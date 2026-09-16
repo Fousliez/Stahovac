@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -14,6 +15,18 @@ class GalleryDLError(RuntimeError):
 
 
 def executable() -> str:
+    """Použij gallery-dl ze stejného virtuálního prostředí jako aplikace.
+
+    start_app.sh spouští Python přímo z .venv, ale virtuální prostředí
+    neaktivuje do PATH. shutil.which() proto dříve mohl najít starou systémovou
+    instalaci gallery-dl místo verze nainstalované v .venv.
+    """
+    python_dir = Path(sys.executable).resolve().parent
+    for name in ("gallery-dl", "gallery-dl.exe"):
+        candidate = python_dir / name
+        if candidate.is_file():
+            return str(candidate)
+
     path = shutil.which("gallery-dl")
     if not path:
         raise GalleryDLError(
