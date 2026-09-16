@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,25 +13,13 @@ class GalleryDLError(RuntimeError):
     pass
 
 
-def executable() -> str:
-    """Použij gallery-dl ze stejného virtuálního prostředí jako aplikace.
+def gallery_dl_command() -> list[str]:
+    """Spusť gallery-dl vždy přes stejný Python jako samotnou aplikaci.
 
-    start_app.sh spouští Python přímo z .venv, ale virtuální prostředí
-    neaktivuje do PATH. shutil.which() proto dříve mohl najít starou systémovou
-    instalaci gallery-dl místo verze nainstalované v .venv.
+    Tím se vyhneme systémové instalaci gallery-dl, která může být výrazně
+    starší než verze nainstalovaná ve virtuálním prostředí projektu.
     """
-    python_dir = Path(sys.executable).resolve().parent
-    for name in ("gallery-dl", "gallery-dl.exe"):
-        candidate = python_dir / name
-        if candidate.is_file():
-            return str(candidate)
-
-    path = shutil.which("gallery-dl")
-    if not path:
-        raise GalleryDLError(
-            "gallery-dl není nainstalovaný. Spusť: pip install -r requirements.txt"
-        )
-    return path
+    return [sys.executable, "-m", "gallery_dl"]
 
 
 def _cookies_args(cookies_file: str) -> list[str]:
@@ -52,7 +39,7 @@ def scan_profile(profile_url: str, cookies_file: str = "") -> list[dict]:
     post vypsat několikrát; deduplikujeme jej podle post_shortcode.
     """
     cmd = [
-        executable(),
+        *gallery_dl_command(),
         "--simulate",
         "--no-colors",
         "--print",
@@ -96,7 +83,7 @@ def download_post(post_url: str, destination: str, cookies_file: str = "") -> No
     target = Path(destination).expanduser()
     target.mkdir(parents=True, exist_ok=True)
     cmd = [
-        executable(),
+        *gallery_dl_command(),
         "--no-colors",
         "--directory",
         str(target),
