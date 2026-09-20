@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 
-GIF_ID_RE = re.compile(r"^[A-Za-z0-9]+$")
+GIF_ID_RE = re.compile(r"^[A-Za-z0-9]+$")\nMEDIA_EXTENSIONS = {".mp4", ".m4v", ".webm", ".gif", ".mov"}
 
 
 class RedGIFError(RuntimeError):
@@ -74,6 +74,35 @@ def scan_profile(profile_url: str) -> list[dict]:
         raise RedGIFError(message)
 
     return list(items.values())
+
+
+def existing_gif_ids(items: list[dict], destination: str) -> set[str]:
+    """Najde RedGIF ID, která už fyzicky existují v cílové složce."""
+    target = Path(destination).expanduser()
+    if not target.is_dir():
+        return set()
+
+    stems = [
+        path.stem.casefold()
+        for path in target.iterdir()
+        if path.is_file() and path.suffix.casefold() in MEDIA_EXTENSIONS
+    ]
+
+    found: set[str] = set()
+    for item in items:
+        gif_id = str(item.get("id", "")).strip()
+        if not GIF_ID_RE.fullmatch(gif_id):
+            continue
+        needle = gif_id.casefold()
+
+        # Rozpozná například:
+        #   quietsomeerne.m4v
+        #   redgifs_quietsomeerne.m4v
+        # a také defaultní názvy galerií končící samotným RedGIF ID.
+        if any(stem == needle or stem.endswith(needle) for stem in stems):
+            found.add(gif_id)
+
+    return found
 
 
 def download_gif(gif_id: str, post_url: str, destination: str) -> None:
