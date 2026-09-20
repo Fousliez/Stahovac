@@ -258,6 +258,12 @@ class MainWindow(QMainWindow):
         self._batch_download_queue: list[tuple[int, str, list[dict]]] = []
         self._batch_download_results: list[dict] = []
 
+        self._scan_batch_mode = False
+        self._scan_batch_total_profiles = 0
+        self._scan_batch_current_position = 0
+        self._scan_batch_queue: list[tuple[int, str]] = []
+        self._scan_batch_results: list[dict] = []
+
         self.setWindowTitle(f"{APPLICATION_NAME} {BUILD_VERSION}")
         self.resize(1120, 760)
         self._build_ui()
@@ -282,6 +288,14 @@ class MainWindow(QMainWindow):
         top_right = QVBoxLayout()
         top_right.setSpacing(6)
 
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Hledat v profilech…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMinimumWidth(260)
+        self.search_edit.setToolTip("Fulltextové hledání ve všech sloupcích profilů")
+        self.search_edit.textChanged.connect(self.filter_profiles)
+        top_right.addWidget(self.search_edit)
+
         self.settings_button = QPushButton("Nastavení")
         self.settings_button.clicked.connect(self.open_settings)
         top_right.addWidget(self.settings_button)
@@ -296,7 +310,7 @@ class MainWindow(QMainWindow):
 
         buttons = QHBoxLayout()
         self.add_button = QPushButton("+ Profily")
-        self.scan_button = QPushButton("Projít profil")
+        self.scan_button = QPushButton("Projít profily")
         self.download_button = QPushButton("Stáhnout nové")
         self.delete_button = QPushButton("Odstranit profil")
 
@@ -667,7 +681,41 @@ class MainWindow(QMainWindow):
         else:
             self.refresh_items()
 
+        self.filter_profiles()
         self.update_profile_actions()
+
+    def filter_profiles(self):
+        needle = self.search_edit.text().strip().casefold()
+        visible = 0
+        first_visible = -1
+
+        for row in range(self.table.rowCount()):
+            values = []
+            for column in range(self.table.columnCount()):
+                item = self.table.item(row, column)
+                if item is not None:
+                    values.append(item.text())
+
+            matches = not needle or needle in " ".join(values).casefold()
+            self.table.setRowHidden(row, not matches)
+
+            if matches:
+                visible += 1
+                if first_visible < 0:
+                    first_visible = row
+
+        total = self.table.rowCount()
+        if needle:
+            self.profile_count_label.setText(f"PROFILY: {visible} / {total}")
+        else:
+            self.profile_count_label.setText(f"PROFILY: {total}")
+
+        current_row = self.table.currentRow()
+        if current_row >= 0 and self.table.isRowHidden(current_row):
+            self.table.clearSelection()
+            if first_visible >= 0:
+                self.table.setCurrentCell(first_visible, 0)
+                self.table.selectRow(first_visible)
 
     def refresh_items(self):
         username = self.selected_username()
@@ -775,7 +823,101 @@ class MainWindow(QMainWindow):
         self.update_profile_actions()
 
     def scan_selected_profile(self):
-        self._start_scan(self.selected_username(), redownload_all=False)
+        usernames = self.selected_usernames()
+        if (
+            not usernames
+            or self.scan_thread is not None
+            or self.download_thread is not None
+            or self._busy
+        ):
+            return
+
+        if len(usernames) == 1:
+            self._start_scan(usernames[0], redownload_all=False)
+            return
+
+        self._scan_batch_mode = True
+        self._scan_batch_total_profiles = len(usernames)
+        self._scan_batch_current_position = 0
+        self._scan_batch_queue = [
+            (position, username)
+            for position, username in enumerate(usernames, start=1)
+        ]
+        self._scan_batch_results = []
+        self.set_busy(True)
+
+        self.download_progress_bar.setRange(0, max(1, len(usernames)))
+        self.download_progress_bar.setValue(0)
+        self.download_progress_bar.setFormat("Kontrola profilů • 0/%m • %p%")
+        self.download_progress_bar.show()
+
+        self._start_next_batch_scan()
+
+    def _start_next_batch_scan(self):
+        if not self._scan_batch_mode or self.scan_thread is not None:
+            return
+
+        if not self._scan_batch_queue:
+            self._finish_scan_batch()
+            return
+
+        position, username = self._scan_batch_queue.pop(0)
+        self._scan_batch_current_position = position
+        self._start_scan(username, redownload_all=False)
+
+    def _finish_scan_batch(self):
+        results = sorted(
+            self._scan_batch_results,
+            key=lambda result: int(result.get("position", 0)),
+        )
+        successful = sum(1 for result in results if result.get("status") == "ok")
+        failed = sum(1 for result in results if result.get("status") == "error")
+        total_new = sum(
+            int(result.get("new_count", 0))
+            for result in results
+            if result.get("status") == "ok"
+        )
+
+        failed_lines = [
+            f"✗ {result.get('username', '')} — {result.get('message', 'chyba')}"
+            for result in results
+            if result.get("status") == "error"
+        ]
+
+        self.download_progress_bar.setRange(
+            0, max(1, self._scan_batch_total_profiles)
+        )
+        self.download_progress_bar.setValue(self._scan_batch_total_profiles)
+        self.download_progress_bar.setFormat("Kontrola dokončena • %p%")
+        self.download_progress_bar.show()
+
+        summary = (
+            f"Zkontrolováno: {successful}\n"
+            f"Chyba: {failed}\n"
+            f"Nových RedGIFů celkem: {total_new}"
+        )
+        if failed_lines:
+            summary += "\n\n" + "\n".join(failed_lines[:10])
+
+        self._scan_batch_mode = False
+        self._scan_batch_total_profiles = 0
+        self._scan_batch_current_position = 0
+        self._scan_batch_queue = []
+        self._scan_batch_results = []
+        self.set_busy(False)
+
+        if failed:
+            QMessageBox.warning(
+                self,
+                "Kontrola profilů dokončena",
+                summary,
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Kontrola profilů dokončena",
+                summary,
+            )
 
     def redownload_entire_profile(self):
         if self._busy:
@@ -817,6 +959,15 @@ class MainWindow(QMainWindow):
         if redownload_all:
             self.statusBar().showMessage(
                 f"Procházím {username} před úplným stažením…"
+            )
+        elif self._scan_batch_mode:
+            self.statusBar().showMessage(
+                f"Procházím profil {self._scan_batch_current_position}/"
+                f"{self._scan_batch_total_profiles}: {username}…"
+            )
+            self.download_progress_bar.setFormat(
+                f"Kontrola {self._scan_batch_current_position}/"
+                f"{self._scan_batch_total_profiles} • {username} • %p%"
             )
         else:
             self.statusBar().showMessage(f"Procházím {username}…")
@@ -864,6 +1015,23 @@ class MainWindow(QMainWindow):
             )
             return
 
+        if self._scan_batch_mode:
+            self._scan_batch_results.append(
+                {
+                    "position": self._scan_batch_current_position,
+                    "username": username,
+                    "status": "ok",
+                    "found_count": len(items),
+                    "new_count": new_count,
+                    "recognized": recognized,
+                    "message": "",
+                }
+            )
+            self.download_progress_bar.setValue(
+                self._scan_batch_current_position
+            )
+            return
+
         extra = f", {recognized} už bylo ve složce" if recognized else ""
         self.statusBar().showMessage(
             f"Kontrola hotová: {len(items)} nalezených, {new_count} ke stažení{extra}.",
@@ -872,6 +1040,27 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _scan_failed(self, message: str):
+        if self._scan_batch_mode:
+            self._scan_batch_results.append(
+                {
+                    "position": self._scan_batch_current_position,
+                    "username": self.scanning_username,
+                    "status": "error",
+                    "found_count": 0,
+                    "new_count": 0,
+                    "recognized": 0,
+                    "message": message,
+                }
+            )
+            self.download_progress_bar.setValue(
+                self._scan_batch_current_position
+            )
+            self.statusBar().showMessage(
+                f"Kontrola {self.scanning_username} se nepodařila, pokračuji…",
+                2500,
+            )
+            return
+
         QMessageBox.warning(self, "Kontrola profilu", message)
         self.statusBar().showMessage("Kontrola se nepodařila.", 4000)
 
@@ -879,6 +1068,8 @@ class MainWindow(QMainWindow):
     def _scan_cleanup(self):
         pending_username = self._pending_redownload_username
         pending_items = list(self._pending_redownload_items)
+        was_scan_batch = self._scan_batch_mode
+        has_more_scan_items = bool(self._scan_batch_queue)
 
         self.scan_thread = None
         self.scan_worker = None
@@ -894,8 +1085,16 @@ class MainWindow(QMainWindow):
                 force=True,
                 redownload_all=True,
             )
-        else:
-            self.set_busy(False)
+            return
+
+        if was_scan_batch:
+            if has_more_scan_items:
+                QTimer.singleShot(0, self._start_next_batch_scan)
+            else:
+                QTimer.singleShot(0, self._finish_scan_batch)
+            return
+
+        self.set_busy(False)
 
     def select_profile(self, username: str):
         needle = username.casefold()
