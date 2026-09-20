@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 
-GIF_ID_RE = re.compile(r"^[A-Za-z0-9]+$")\nMEDIA_EXTENSIONS = {".mp4", ".m4v", ".webm", ".gif", ".mov"}
+GIF_ID_RE = re.compile(r"^[A-Za-z0-9]+$")
+MEDIA_EXTENSIONS = {".mp4", ".m4v", ".webm", ".gif", ".mov"}
 
 
 class RedGIFError(RuntimeError):
@@ -37,11 +38,9 @@ def _run(cmd: list[str], timeout: int = 1800) -> subprocess.CompletedProcess[str
 
 def scan_profile(profile_url: str) -> list[dict]:
     """Vrátí unikátní RedGIF ID nalezená na uživatelském profilu."""
-    # --print samo o sobě vypne stahování. Nekombinovat s --simulate:
-    # SimulationJob v gallery-dl nespouští prepare postprocessory, takže
-    # --print pak nic nevypíše, přestože profil normálně otevře.
     cmd = [
         *gallery_dl_command(),
+        "--config-ignore",
         "--no-colors",
         "--no-input",
         "--print",
@@ -66,9 +65,7 @@ def scan_profile(profile_url: str) -> list[dict]:
 
     if not items:
         detail = process.stderr.strip()
-        message = (
-            "Profil se podařilo otevřít, ale gallery-dl nevrátil žádná RedGIF ID."
-        )
+        message = "Profil se podařilo otevřít, ale gallery-dl nevrátil žádná RedGIF ID."
         if detail:
             message += f"\n\n{detail}"
         raise RedGIFError(message)
@@ -95,10 +92,6 @@ def existing_gif_ids(items: list[dict], destination: str) -> set[str]:
             continue
         needle = gif_id.casefold()
 
-        # Rozpozná například:
-        #   quietsomeerne.m4v
-        #   redgifs_quietsomeerne.m4v
-        # a také defaultní názvy galerií končící samotným RedGIF ID.
         if any(stem == needle or stem.endswith(needle) for stem in stems):
             found.add(gif_id)
 
@@ -113,15 +106,14 @@ def download_gif(gif_id: str, post_url: str, destination: str) -> None:
     target = Path(destination).expanduser()
     target.mkdir(parents=True, exist_ok=True)
 
-    # Některý RedGIF může patřit do galerie. Filtr zajistí, že se při
-    # otevření watch URL stáhne jen konkrétní ID a ne celá galerie.
     cmd = [
         *gallery_dl_command(),
+        "--config-ignore",
         "--no-colors",
         "--no-input",
-        "--directory",
+        "-D",
         str(target),
-        "--filename",
+        "-f",
         "{id}.{extension}",
         "--filter",
         f"id == '{gif_id}'",
