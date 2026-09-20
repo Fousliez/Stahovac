@@ -914,7 +914,7 @@ class MainWindow(QMainWindow):
             self,
             "Probíhá stahování",
             "Právě probíhá stahování. Opravdu chcete program ukončit?\n\n"
-            "Probíhající stahování bude přerušeno.",
+            "Právě stahovaný soubor může zůstat nedokončený.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
