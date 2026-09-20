@@ -1,0 +1,1 @@
+"""RedGIF downloader application."""
