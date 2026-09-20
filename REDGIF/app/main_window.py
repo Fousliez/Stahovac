@@ -209,9 +209,9 @@ class MainWindow(QMainWindow):
         self.download_button.clicked.connect(self.download_new_items)
         self.delete_button.clicked.connect(self.delete_selected_profile)
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ["Profil", "Poslední kontrola", "Nové", "Staženo", "Stav"]
+            ["Jméno", "Profil", "Poslední kontrola", "Nové", "Staženo", "Stav"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -219,12 +219,14 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 270)
-        self.table.setColumnWidth(1, 120)
-        self.table.setColumnWidth(2, 80)
+        self.table.setColumnWidth(0, 180)
+        self.table.setColumnWidth(1, 240)
+        self.table.setColumnWidth(2, 120)
         self.table.setColumnWidth(3, 80)
+        self.table.setColumnWidth(4, 80)
         self.table.itemSelectionChanged.connect(self.refresh_items)
         self.table.itemSelectionChanged.connect(self.update_profile_actions)
+        self.table.cellDoubleClicked.connect(self.edit_profile_name)
         layout.addWidget(self.table, 2)
 
         items_top = QHBoxLayout()
@@ -319,6 +321,29 @@ class MainWindow(QMainWindow):
         )
         return Path(base).expanduser() / username
 
+    def edit_profile_name(self, row: int, _column: int):
+        item = self.table.item(row, 0)
+        username = str(item.data(Qt.UserRole) or "") if item else ""
+        if not username:
+            return
+
+        profile = self.storage.profile(username) or {}
+        current_name = str(profile.get("name", ""))
+
+        name, ok = QInputDialog.getText(
+            self,
+            "Jméno profilu",
+            f"Jméno pro profil {username}:",
+            QLineEdit.Normal,
+            current_name,
+        )
+        if not ok:
+            return
+
+        self.storage.set_profile_name(username, name)
+        self.refresh_profiles()
+        self.select_profile(username)
+
     def update_profile_actions(self):
         self.open_folder_button.setEnabled(bool(self.selected_username()))
 
@@ -369,6 +394,7 @@ class MainWindow(QMainWindow):
 
         for row_index, profile in enumerate(profiles):
             username = str(profile.get("username", ""))
+            custom_name = str(profile.get("name", ""))
             items = self.storage.load_scan(username)
             downloaded_count = self.storage.downloaded_count(username, items)
             new_count = len(self.storage.new_items(username, items))
@@ -382,6 +408,7 @@ class MainWindow(QMainWindow):
                 state = "V pořádku"
 
             values = [
+                custom_name,
                 username,
                 self.format_last_scan(last_scan),
                 str(new_count),
@@ -391,7 +418,7 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.UserRole, username)
-                if column in {2, 3}:
+                if column in {3, 4}:
                     item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_index, column, item)
 
