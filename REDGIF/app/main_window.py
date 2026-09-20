@@ -69,12 +69,14 @@ class DownloadWorker(QObject):
         items: list[dict],
         destination: str,
         storage: Storage,
+        force: bool = False,
     ):
         super().__init__()
         self.username = username
         self.items = items
         self.destination = destination
         self.storage = storage
+        self.force = force
 
     @Slot()
     def run(self):
@@ -86,7 +88,12 @@ class DownloadWorker(QObject):
             gif_id = str(item["id"])
             self.progress.emit(index, total, gif_id)
             try:
-                download_gif(gif_id, str(item["url"]), self.destination)
+                download_gif(
+                    gif_id,
+                    str(item["url"]),
+                    self.destination,
+                    force=self.force,
+                )
                 self.storage.mark(self.username, gif_id)
                 downloaded += 1
                 self.item_finished.emit(gif_id, True, "")
@@ -154,6 +161,10 @@ class MainWindow(QMainWindow):
         self.download_destination = ""
         self._download_errors: list[str] = []
         self._busy = False
+        self._scan_redownload_all = False
+        self._pending_redownload_username = ""
+        self._pending_redownload_items: list[dict] = []
+        self._download_redownload_all = False
 
         self.setWindowTitle(f"{APPLICATION_NAME} {BUILD_VERSION}")
         self.resize(1120, 760)
@@ -374,6 +385,8 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         open_link_action = menu.addAction("Otevřít odkaz")
+        redownload_action = menu.addAction("Stáhnout znovu celý profil")
+        redownload_action.setEnabled(not self._busy)
         menu.addSeparator()
         delete_action = menu.addAction("Odstranit profil")
         delete_action.setEnabled(not self._busy)
@@ -381,6 +394,8 @@ class MainWindow(QMainWindow):
 
         if chosen == open_link_action:
             self.open_selected_profile_url()
+        elif chosen == redownload_action:
+            self.redownload_entire_profile()
         elif chosen == delete_action:
             self.delete_selected_profile()
 
@@ -609,7 +624,32 @@ class MainWindow(QMainWindow):
         self.update_profile_actions()
 
     def scan_selected_profile(self):
+        self._start_scan(self.selected_username(), redownload_all=False)
+
+    def redownload_entire_profile(self):
+        if self._busy:
+            return
+
         username = self.selected_username()
+        if not username:
+            return
+
+        result = QMessageBox.question(
+            self,
+            "Stáhnout znovu celý profil",
+            f"Stáhnout znovu celý profil {username}?\n\n"
+            "Program profil znovu projde a stáhne všechny nalezené RedGIFy "
+            "bez ohledu na databázové markery. Existující soubory se přepíšou.\n\n"
+            "Pokračovat?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if result != QMessageBox.Yes:
+            return
+
+        self._start_scan(username, redownload_all=True)
+
+    def _start_scan(self, username: str, redownload_all: bool = False):
         if not username or self.scan_thread is not None or self.download_thread is not None:
             return
 
@@ -618,8 +658,17 @@ class MainWindow(QMainWindow):
             return
 
         self.scanning_username = username
+        self._scan_redownload_all = redownload_all
+        self._pending_redownload_username = ""
+        self._pending_redownload_items = []
         self.set_busy(True)
-        self.statusBar().showMessage(f"Procházím {username}…")
+
+        if redownload_all:
+            self.statusBar().showMessage(
+                f"Procházím {username} před úplným stažením…"
+            )
+        else:
+            self.statusBar().showMessage(f"Procházím {username}…")
 
         thread = QThread(self)
         worker = ScanWorker(str(profile["url"]))
@@ -654,6 +703,16 @@ class MainWindow(QMainWindow):
         self.refresh_profiles()
         self.select_profile(username)
         self.refresh_items()
+
+        if self._scan_redownload_all:
+            self._pending_redownload_username = username
+            self._pending_redownload_items = list(items)
+            self.statusBar().showMessage(
+                f"Kontrola hotová: {len(items)} nalezených. "
+                "Spouštím úplné stažení profilu…"
+            )
+            return
+
         extra = f", {recognized} už bylo ve složce" if recognized else ""
         self.statusBar().showMessage(
             f"Kontrola hotová: {len(items)} nalezených, {new_count} ke stažení{extra}.",
@@ -667,10 +726,25 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _scan_cleanup(self):
-        self.set_busy(False)
+        pending_username = self._pending_redownload_username
+        pending_items = list(self._pending_redownload_items)
+
         self.scan_thread = None
         self.scan_worker = None
         self.scanning_username = ""
+        self._scan_redownload_all = False
+        self._pending_redownload_username = ""
+        self._pending_redownload_items = []
+
+        if pending_username and pending_items:
+            self._start_download(
+                pending_username,
+                pending_items,
+                force=True,
+                redownload_all=True,
+            )
+        else:
+            self.set_busy(False)
 
     def select_profile(self, username: str):
         needle = username.casefold()
@@ -702,15 +776,34 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(message, 5000)
             return
 
+        self._start_download(username, items)
+
+    def _start_download(
+        self,
+        username: str,
+        items: list[dict],
+        force: bool = False,
+        redownload_all: bool = False,
+    ):
+        if not username or not items or self.download_thread is not None:
+            return
+
         destination = str(self.profile_download_dir(username))
 
         self.downloading_username = username
         self.download_destination = destination
         self._download_errors = []
+        self._download_redownload_all = redownload_all
         self.set_busy(True)
 
         thread = QThread(self)
-        worker = DownloadWorker(username, items, destination, self.storage)
+        worker = DownloadWorker(
+            username,
+            items,
+            destination,
+            self.storage,
+            force=force,
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._download_progress)
@@ -727,7 +820,8 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int, str)
     def _download_progress(self, index: int, total: int, gif_id: str):
-        self.statusBar().showMessage(f"Stahuji {index}/{total}: {gif_id}…")
+        action = "Stahuji znovu" if self._download_redownload_all else "Stahuji"
+        self.statusBar().showMessage(f"{action} {index}/{total}: {gif_id}…")
 
     @Slot(str, bool, str)
     def _download_item_finished(self, _gif_id: str, success: bool, message: str):
@@ -753,8 +847,10 @@ class MainWindow(QMainWindow):
             self.select_profile(username)
         self.refresh_items()
 
+        label = "Znovu staženo" if self._download_redownload_all else "Staženo"
         self.statusBar().showMessage(
-            f"Staženo: {downloaded}. Chyby: {errors}. Složka: {self.download_destination}",
+            f"{label}: {downloaded}. Chyby: {errors}. "
+            f"Složka: {self.download_destination}",
             7000,
         )
 
@@ -773,6 +869,7 @@ class MainWindow(QMainWindow):
         self.downloading_username = ""
         self.download_destination = ""
         self._download_errors = []
+        self._download_redownload_all = False
 
     def delete_selected_profile(self):
         if self._busy:
