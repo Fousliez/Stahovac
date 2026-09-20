@@ -134,7 +134,7 @@ class Storage:
         download_dir = Path(
             self.get_setting("download_dir", default_dir)
         ).expanduser()
-        return download_dir / ".redgif_markers"
+        return download_dir / "REDGIF_MARKERY"
 
     def marker_path(self, username: str, gif_id: str) -> Path:
         # RedGIF ID je globálně unikátní, proto markery nemusíme dělit
