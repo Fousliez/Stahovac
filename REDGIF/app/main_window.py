@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStatusBar,
@@ -227,6 +228,8 @@ class MainWindow(QMainWindow):
         self.table.itemSelectionChanged.connect(self.refresh_items)
         self.table.itemSelectionChanged.connect(self.update_profile_actions)
         self.table.cellDoubleClicked.connect(self.edit_profile_name)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_profile_context_menu)
         layout.addWidget(self.table, 2)
 
         items_top = QHBoxLayout()
@@ -347,6 +350,22 @@ class MainWindow(QMainWindow):
 
     def update_profile_actions(self):
         self.open_folder_button.setEnabled(bool(self.selected_username()))
+
+    def show_profile_context_menu(self, position):
+        item = self.table.itemAt(position)
+        if item is None:
+            return
+
+        row = item.row()
+        self.table.selectRow(row)
+        self.table.setCurrentCell(row, 0)
+
+        menu = QMenu(self)
+        delete_action = menu.addAction("Odstranit profil")
+        chosen = menu.exec(self.table.viewport().mapToGlobal(position))
+
+        if chosen == delete_action:
+            self.delete_selected_profile()
 
     def open_selected_profile_folder(self):
         username = self.selected_username()
