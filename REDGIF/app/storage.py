@@ -19,6 +19,7 @@ class Storage:
         self.scans_dir = self.data_dir / "scans"
         self.legacy_markers_dir = self.data_dir / "markers"
         self.scans_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_profile_metadata()
 
         self._marker_lock = threading.RLock()
         self._marker_ids: set[str] = set()
@@ -57,6 +58,28 @@ class Storage:
     def _save_profiles(self, profiles: list[dict]) -> None:
         self._write_json(self.profiles_file, profiles)
 
+    def _migrate_profile_metadata(self) -> None:
+        profiles = self._read_json(self.profiles_file, [])
+        if not isinstance(profiles, list):
+            return
+
+        changed = False
+        for profile in profiles:
+            if not isinstance(profile, dict) or "last_update" in profile:
+                continue
+
+            last_scan = str(profile.get("last_scan", ""))
+            try:
+                new_count = int(profile.get("new", 0))
+            except (TypeError, ValueError):
+                new_count = 0
+
+            profile["last_update"] = last_scan if last_scan and new_count == 0 else ""
+            changed = True
+
+        if changed:
+            self._save_profiles(profiles)
+
     def profile(self, username: str) -> dict | None:
         needle = username.casefold()
         for profile in self.profiles():
@@ -75,6 +98,7 @@ class Storage:
                 "username": username,
                 "url": url,
                 "last_scan": "",
+                "last_update": "",
                 "total": 0,
                 "new": 0,
             }
@@ -114,6 +138,15 @@ class Storage:
                 profile["last_scan"] = last_scan
                 profile["total"] = int(total)
                 profile["new"] = int(new)
+                break
+        self._save_profiles(profiles)
+
+    def update_last_update(self, username: str, timestamp: str) -> None:
+        profiles = self.profiles()
+        needle = username.casefold()
+        for profile in profiles:
+            if str(profile.get("username", "")).casefold() == needle:
+                profile["last_update"] = timestamp
                 break
         self._save_profiles(profiles)
 
