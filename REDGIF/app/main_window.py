@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -637,8 +638,36 @@ class MainWindow(QMainWindow):
 
     def open_selected_item(self):
         item = self.selected_item()
-        if item is not None:
-            QDesktopServices.openUrl(QUrl(str(item.get("url", ""))))
+        if item is None:
+            self.statusBar().showMessage("Nejdřív vyber RedGIF v tabulce.", 3000)
+            return
+
+        url = str(item.get("url", "")).strip()
+        if not url:
+            QMessageBox.warning(self, "Otevřít RedGIF", "U vybrané položky chybí odkaz.")
+            return
+
+        try:
+            subprocess.Popen(
+                ["xdg-open", url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self.statusBar().showMessage("Otevírám RedGIF v prohlížeči…", 2500)
+            return
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            QMessageBox.warning(self, "Otevřít RedGIF", f"Odkaz se nepodařilo otevřít:\n{exc}")
+            return
+
+        if not QDesktopServices.openUrl(QUrl(url)):
+            QMessageBox.warning(
+                self,
+                "Otevřít RedGIF",
+                "Odkaz se nepodařilo otevřít v systémovém prohlížeči.",
+            )
 
     def delete_selected_profile(self):
         username = self.selected_username()
