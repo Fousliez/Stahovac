@@ -152,6 +152,7 @@ class MainWindow(QMainWindow):
         self.downloading_username = ""
         self.download_destination = ""
         self._download_errors: list[str] = []
+        self._busy = False
 
         self.setWindowTitle(f"{APPLICATION_NAME} {BUILD_VERSION}")
         self.resize(1120, 760)
@@ -362,6 +363,7 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         delete_action = menu.addAction("Odstranit profil")
+        delete_action.setEnabled(not self._busy)
         chosen = menu.exec(self.table.viewport().mapToGlobal(position))
 
         if chosen == delete_action:
@@ -542,17 +544,18 @@ class MainWindow(QMainWindow):
             )
 
     def set_busy(self, busy: bool):
-        for button in (
-            self.add_button,
-            self.scan_button,
-            self.download_button,
-            self.delete_button,
-            self.settings_button,
-            self.open_folder_button,
-        ):
-            button.setDisabled(busy)
-        if not busy:
-            self.update_profile_actions()
+        self._busy = busy
+
+        # Přidání dalšího profilu ani otevření jeho složky nezasahuje do
+        # právě probíhající kontroly/stahování, takže tyto akce zůstávají
+        # dostupné. Blokujeme jen operace, které mohou měnit aktivní úlohu
+        # nebo její nastavení.
+        self.add_button.setEnabled(True)
+        self.scan_button.setDisabled(busy)
+        self.download_button.setDisabled(busy)
+        self.delete_button.setDisabled(busy)
+        self.settings_button.setDisabled(busy)
+        self.update_profile_actions()
 
     def scan_selected_profile(self):
         username = self.selected_username()
@@ -716,6 +719,13 @@ class MainWindow(QMainWindow):
         self._download_errors = []
 
     def delete_selected_profile(self):
+        if self._busy:
+            self.statusBar().showMessage(
+                "Profil nejde odstranit během probíhající kontroly nebo stahování.",
+                3500,
+            )
+            return
+
         username = self.selected_username()
         if not username:
             return
