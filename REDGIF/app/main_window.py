@@ -242,6 +242,10 @@ class MainWindow(QMainWindow):
         self.download_button.clicked.connect(self.download_new_items)
         self.delete_button.clicked.connect(self.delete_selected_profile)
 
+        self.profile_count_label = QLabel("PROFILY: 0")
+        self.profile_count_label.setObjectName("sectionTitle")
+        layout.addWidget(self.profile_count_label)
+
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
             ["Jméno", "Profil", "Poslední kontrola", "Nové", "Staženo", "Stav"]
@@ -485,6 +489,7 @@ class MainWindow(QMainWindow):
 
     def refresh_profiles(self):
         profiles = self.storage.profiles()
+        self.profile_count_label.setText(f"PROFILY: {len(profiles)}")
         selected = self.selected_username()
         self.table.blockSignals(True)
         self.table.setRowCount(len(profiles))
