@@ -241,7 +241,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.items_table, 3)
 
         hint = QLabel(
-            "Markery se ukládají společně do skryté složky .redgif_markers "
+            "Markery se ukládají společně do složky REDGIF_MARKERY "
             "uvnitř zvolené složky pro stahování. Zůstávají tam i po smazání "
             "videa, takže stejný RedGIF program znovu nestáhne."
         )
