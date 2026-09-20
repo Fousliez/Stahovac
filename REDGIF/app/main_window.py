@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .redgifs_dl import download_gif, scan_profile
+from .redgifs_dl import download_gif, existing_gif_ids, scan_profile
 from .storage import Storage
 from .version import APPLICATION_NAME, BUILD_VERSION
 
@@ -310,6 +310,25 @@ class MainWindow(QMainWindow):
                 return value
         return None
 
+    def sync_existing_files(self, username: str, items: list[dict] | None = None) -> int:
+        """Převede už existující videa ve složce na markery."""
+        if items is None:
+            items = self.storage.load_scan(username)
+
+        base = self.storage.get_setting(
+            "download_dir",
+            str(Path.home() / "Stažené" / "RedGIF"),
+        )
+        destination = str(Path(base).expanduser() / username)
+        found = existing_gif_ids(items, destination)
+
+        created = 0
+        for gif_id in found:
+            if not self.storage.is_marked(username, gif_id):
+                self.storage.mark(username, gif_id)
+                created += 1
+        return created
+
     def refresh_profiles(self):
         profiles = self.storage.profiles()
         selected = self.selected_username()
@@ -487,6 +506,7 @@ class MainWindow(QMainWindow):
             return
 
         self.storage.save_scan(username, items)
+        recognized = self.sync_existing_files(username, items)
         new_count = len(self.storage.new_items(username, items))
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.storage.update_scan_stats(username, now, len(items), new_count)
@@ -494,8 +514,9 @@ class MainWindow(QMainWindow):
         self.refresh_profiles()
         self.select_profile(username)
         self.refresh_items()
+        extra = f", {recognized} už bylo ve složce" if recognized else ""
         self.statusBar().showMessage(
-            f"Kontrola hotová: {len(items)} nalezených, {new_count} ke stažení.",
+            f"Kontrola hotová: {len(items)} nalezených, {new_count} ke stažení{extra}.",
             5000,
         )
 
@@ -526,9 +547,19 @@ class MainWindow(QMainWindow):
         if not username or self.download_thread is not None or self.scan_thread is not None:
             return
 
-        items = self.storage.new_items(username)
+        all_items = self.storage.load_scan(username)
+        recognized = self.sync_existing_files(username, all_items)
+        items = self.storage.new_items(username, all_items)
+        if recognized:
+            self.refresh_profiles()
+            self.select_profile(username)
+            self.refresh_items()
+
         if not items:
-            self.statusBar().showMessage("Žádné nové RedGIFy ke stažení.", 2500)
+            message = "Žádné nové RedGIFy ke stažení."
+            if recognized:
+                message += f" {recognized} souborů už ve složce bylo a bylo označeno jako stažené."
+            self.statusBar().showMessage(message, 5000)
             return
 
         base = self.storage.get_setting(
