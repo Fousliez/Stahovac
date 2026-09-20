@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QProgressBar,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -83,13 +84,16 @@ class DownloadWorker(QObject):
     @Slot()
     def run(self):
         total = len(self.items)
+        completed_ids: set[str] = set()
         self.progress.emit(0, total, "")
 
-        existing_before = (
-            existing_gif_ids(self.items, self.destination)
-            if not self.force
-            else set()
-        )
+        def file_finished(gif_id: str):
+            key = gif_id.casefold()
+            if key in completed_ids:
+                return
+            completed_ids.add(key)
+            self.storage.mark(self.username, gif_id)
+            self.progress.emit(len(completed_ids), total, gif_id)
 
         try:
             download_profile_items(
@@ -97,25 +101,17 @@ class DownloadWorker(QObject):
                 self.items,
                 self.destination,
                 force=self.force,
+                progress_callback=file_finished,
             )
         except Exception as exc:
-            if self.force:
-                self.item_finished.emit("", False, str(exc))
-                self.finished.emit(0, 1)
-                return
-
-            existing_after = existing_gif_ids(self.items, self.destination)
-            completed = existing_after - existing_before
-            for item in self.items:
-                gif_id = str(item.get("id", ""))
-                if gif_id in completed:
-                    self.storage.mark(self.username, gif_id)
-
-            remaining = max(1, total - len(completed))
+            downloaded = len(completed_ids)
+            errors = max(1, total - downloaded)
             self.item_finished.emit("", False, str(exc))
-            self.finished.emit(len(completed), remaining)
+            self.finished.emit(downloaded, errors)
             return
 
+        # Pojistka pro případ, že gallery-dl úspěšně skončí, ale některý
+        # dokončený soubor nevyvolá výstupní událost.
         for item in self.items:
             gif_id = str(item.get("id", ""))
             self.storage.mark(self.username, gif_id)
@@ -296,6 +292,19 @@ class MainWindow(QMainWindow):
         self.download_button.clicked.connect(self.download_new_items)
         self.delete_button.clicked.connect(self.delete_selected_profile)
 
+        progress_row = QHBoxLayout()
+        self.download_progress_label = QLabel("Stahování")
+        self.download_progress_label.setMinimumWidth(210)
+        self.download_progress_bar = QProgressBar()
+        self.download_progress_bar.setRange(0, 1)
+        self.download_progress_bar.setValue(0)
+        self.download_progress_bar.setFormat("%p%")
+        self.download_progress_label.hide()
+        self.download_progress_bar.hide()
+        progress_row.addWidget(self.download_progress_label)
+        progress_row.addWidget(self.download_progress_bar, 1)
+        layout.addLayout(progress_row)
+
         self.profile_count_label = QLabel("PROFILY: 0")
         self.profile_count_label.setObjectName("sectionTitle")
         layout.addWidget(self.profile_count_label)
@@ -368,6 +377,11 @@ class MainWindow(QMainWindow):
             }
             QPushButton:hover { background: #f8f8f8; border-color: #9da2aa; }
             QPushButton:disabled { color: #969ba3; background: #eceef0; }
+            QProgressBar {
+                background: #ffffff; border: 1px solid #c9ccd1; border-radius: 5px;
+                min-height: 24px; text-align: center; font-weight: 700;
+            }
+            QProgressBar::chunk { background: #7aa874; border-radius: 4px; }
             QTableWidget {
                 background: #ffffff; alternate-background-color: #f8f9fa;
                 border: 1px solid #c9ccd1; gridline-color: #e1e3e6;
@@ -867,6 +881,15 @@ class MainWindow(QMainWindow):
         self._download_redownload_all = redownload_all
         self.set_busy(True)
 
+        total = len(items)
+        action = "Stahuji znovu" if redownload_all else "Stahuji"
+        self.download_progress_label.setText(f"{action}: 0 / {total}")
+        self.download_progress_bar.setRange(0, max(1, total))
+        self.download_progress_bar.setValue(0)
+        self.download_progress_bar.setFormat("%p%")
+        self.download_progress_label.show()
+        self.download_progress_bar.show()
+
         profile = self.storage.profile(username) or {}
         profile_url = str(
             profile.get("url", f"https://www.redgifs.com/users/{username}")
@@ -898,6 +921,10 @@ class MainWindow(QMainWindow):
     @Slot(int, int, str)
     def _download_progress(self, index: int, total: int, gif_id: str):
         action = "Stahuji znovu" if self._download_redownload_all else "Stahuji"
+        self.download_progress_bar.setRange(0, max(1, total))
+        self.download_progress_bar.setValue(index)
+        self.download_progress_label.setText(f"{action}: {index} / {total}")
+
         if index == 0:
             self.statusBar().showMessage(
                 f"{action} dávkově: {total} položek…"
@@ -930,6 +957,17 @@ class MainWindow(QMainWindow):
         self.refresh_items()
 
         label = "Znovu staženo" if self._download_redownload_all else "Staženo"
+        total = max(downloaded + errors, self.download_progress_bar.maximum())
+        if errors == 0:
+            self.download_progress_bar.setValue(self.download_progress_bar.maximum())
+            self.download_progress_label.setText(
+                f"Hotovo: {downloaded} / {downloaded}"
+            )
+        else:
+            self.download_progress_label.setText(
+                f"Dokončeno s chybami: {downloaded} / {total}"
+            )
+
         self.statusBar().showMessage(
             f"{label}: {downloaded}. Chyby: {errors}. "
             f"Složka: {self.download_destination}",
@@ -940,7 +978,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Některé RedGIFy se nepodařilo stáhnout",
-                "\n\n".join(self._download_errors[:5]),
+                f"Staženo: {downloaded}. Chyby: {errors}.\n\n"
+                + "\n\n".join(self._download_errors[:5]),
+            )
+        elif errors == 0:
+            QMessageBox.information(
+                self,
+                "Stahování dokončeno",
+                f"Stahování bylo dokončeno.\n\nStaženo: {downloaded}",
             )
 
     @Slot()
