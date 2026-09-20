@@ -18,7 +18,10 @@ def gallery_dl_command() -> list[str]:
     return [sys.executable, "-m", "gallery_dl"]
 
 
-def _run(cmd: list[str], timeout: int = 1800) -> subprocess.CompletedProcess[str]:
+def _run(
+    cmd: list[str],
+    timeout: int | None = 1800,
+) -> subprocess.CompletedProcess[str]:
     try:
         process = subprocess.run(
             cmd,
@@ -132,3 +135,48 @@ def download_gif(
         ]
     )
     _run(cmd)
+
+def download_profile_items(
+    profile_url: str,
+    items: list[dict],
+    destination: str,
+    force: bool = False,
+) -> None:
+    """Stáhne vybrané RedGIFy z profilu v jediném procesu gallery-dl."""
+    ids = [
+        str(item.get("id", "")).strip()
+        for item in items
+        if GIF_ID_RE.fullmatch(str(item.get("id", "")).strip())
+    ]
+    if not ids:
+        return
+
+    target = Path(destination).expanduser()
+    target.mkdir(parents=True, exist_ok=True)
+
+    # gallery-dl umí Python výraz ve --filter. Tím můžeme projít profil
+    # jedním procesem, ale stáhnout jen položky, které Stahovač skutečně chce.
+    id_filter = f"id in {tuple(ids)!r}"
+
+    cmd = [
+        *gallery_dl_command(),
+        "--config-ignore",
+        "--no-colors",
+        "--no-input",
+        "-R",
+        "10",
+        "--sleep-429",
+        "120",
+        "-D",
+        str(target),
+        "-f",
+        "{id}.{extension}",
+        "--filter",
+        id_filter,
+    ]
+    if force:
+        cmd.append("--no-skip")
+
+    cmd.append(profile_url)
+    _run(cmd, timeout=None)
+
