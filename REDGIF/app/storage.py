@@ -17,7 +17,9 @@ class Storage:
         self.scans_dir = self.data_dir / "scans"
         self.legacy_markers_dir = self.data_dir / "markers"
         self.scans_dir.mkdir(parents=True, exist_ok=True)
-        self.migrate_legacy_markers()
+
+        self._marker_ids: set[str] = set()
+        self._load_or_migrate_markers()
 
     @staticmethod
     def _read_json(path: Path, default):
@@ -40,6 +42,10 @@ class Storage:
     def safe_name(value: str) -> str:
         cleaned = SAFE_NAME_RE.sub("_", value.strip())
         return cleaned or "_"
+
+    @staticmethod
+    def normalize_marker_id(gif_id: str) -> str:
+        return gif_id.strip().casefold()
 
     def profiles(self) -> list[dict]:
         data = self._read_json(self.profiles_file, [])
@@ -94,8 +100,8 @@ class Storage:
             scan_path.unlink()
         except FileNotFoundError:
             pass
-        # Společné markery záměrně nemažeme. Při opětovném přidání profilu
-        # tak program stále ví, co už bylo v minulosti staženo.
+        # Společný seznam markerů záměrně nemažeme. Při opětovném přidání
+        # profilu tak program stále ví, co už bylo v minulosti staženo.
 
     def update_scan_stats(self, username: str, last_scan: str, total: int, new: int) -> None:
         profiles = self.profiles()
@@ -115,7 +121,7 @@ class Storage:
         return str(data.get(key, default))
 
     def set_setting(self, key: str, value: str) -> None:
-        old_marker_dir = self.marker_dir() if key == "download_dir" else None
+        existing_ids = set(self._marker_ids) if key == "download_dir" else None
 
         data = self._read_json(self.settings_file, {})
         if not isinstance(data, dict):
@@ -124,10 +130,16 @@ class Storage:
         self._write_json(self.settings_file, data)
 
         if key == "download_dir":
-            new_marker_dir = self.marker_dir()
-            if old_marker_dir is not None and old_marker_dir != new_marker_dir:
-                self._copy_markers(old_marker_dir, new_marker_dir)
-            self.migrate_legacy_markers()
+            new_file = self.marker_file()
+            new_ids = self._read_marker_file(new_file)
+            self._marker_ids = (existing_ids or set()) | new_ids
+
+            # Pokud je v nově zvolené složce ještě starý adresář s .done
+            # markery, vezmeme ho při změně cesty také.
+            self._marker_ids |= self._read_done_markers(
+                new_file.parent / "REDGIF_MARKERY"
+            )
+            self._write_marker_file(new_file, self._marker_ids)
 
     def scan_path(self, username: str) -> Path:
         return self.scans_dir / f"{self.safe_name(username)}.json"
@@ -139,25 +151,30 @@ class Storage:
         data = self._read_json(self.scan_path(username), [])
         return data if isinstance(data, list) else []
 
-    def marker_dir(self) -> Path:
+    def marker_file(self) -> Path:
         default_dir = str(Path.home() / "Stažené" / "RedGIF")
         download_dir = Path(
             self.get_setting("download_dir", default_dir)
         ).expanduser()
-        return download_dir / "REDGIF_MARKERY"
-
-    def marker_path(self, username: str, gif_id: str) -> Path:
-        # RedGIF ID je globálně unikátní, proto markery nemusíme dělit
-        # podle profilů.
-        return self.marker_dir() / f"{self.safe_name(gif_id)}.done"
+        return download_dir / "REDGIF_MARKERY.txt"
 
     def is_marked(self, username: str, gif_id: str) -> bool:
-        return self.marker_path(username, gif_id).exists()
+        del username
+        marker_id = self.normalize_marker_id(gif_id)
+        return bool(marker_id) and marker_id in self._marker_ids
 
     def mark(self, username: str, gif_id: str) -> None:
-        path = self.marker_path(username, gif_id)
+        del username
+        marker_id = self.normalize_marker_id(gif_id)
+        if not marker_id or marker_id in self._marker_ids:
+            return
+
+        path = self.marker_file()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch(exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(marker_id + "\n")
+
+        self._marker_ids.add(marker_id)
 
     def downloaded_count(self, username: str, items: list[dict] | None = None) -> int:
         if items is None:
@@ -176,20 +193,46 @@ class Storage:
             if not self.is_marked(username, str(item.get("id", "")))
         ]
 
+    def _load_or_migrate_markers(self) -> None:
+        marker_file = self.marker_file()
+
+        if marker_file.exists():
+            self._marker_ids = self._read_marker_file(marker_file)
+            return
+
+        # Jednorázový převod ze starších verzí:
+        # 1) data/markers/<profil>/*.done
+        # 2) <složka pro stahování>/REDGIF_MARKERY/*.done
+        ids = self._read_done_markers(self.legacy_markers_dir)
+        ids |= self._read_done_markers(marker_file.parent / "REDGIF_MARKERY")
+
+        self._marker_ids = ids
+        self._write_marker_file(marker_file, ids)
+
+    def _read_marker_file(self, path: Path) -> set[str]:
+        try:
+            return {
+                marker_id
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if (marker_id := self.normalize_marker_id(line))
+            }
+        except (FileNotFoundError, OSError):
+            return set()
+
+    def _read_done_markers(self, directory: Path) -> set[str]:
+        if not directory.is_dir():
+            return set()
+
+        return {
+            marker_id
+            for path in directory.rglob("*.done")
+            if (marker_id := self.normalize_marker_id(path.stem))
+        }
+
     @staticmethod
-    def _copy_markers(source: Path, destination: Path) -> int:
-        if not source.is_dir():
-            return 0
-
-        destination.mkdir(parents=True, exist_ok=True)
-        copied = 0
-        for marker in source.rglob("*.done"):
-            target = destination / marker.name
-            if not target.exists():
-                target.touch()
-                copied += 1
-        return copied
-
-    def migrate_legacy_markers(self) -> int:
-        # Starší verze ukládala markery do data/markers/<profil>/.
-        return self._copy_markers(self.legacy_markers_dir, self.marker_dir())
+    def _write_marker_file(path: Path, ids: set[str]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(path.suffix + ".tmp")
+        content = "".join(f"{marker_id}\n" for marker_id in sorted(ids))
+        temp.write_text(content, encoding="utf-8")
+        temp.replace(path)
