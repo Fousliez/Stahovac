@@ -165,6 +165,60 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
+class AddProfilesDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Přidat RedGIFs profily")
+        self.resize(620, 300)
+
+        layout = QVBoxLayout(self)
+
+        info = QLabel("Zadej uživatelské jméno nebo URL. Každý profil má vlastní řádek.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.rows_layout = QVBoxLayout()
+        self.rows_layout.setSpacing(6)
+        layout.addLayout(self.rows_layout)
+
+        self.profile_edits: list[QLineEdit] = []
+        for _ in range(5):
+            self.add_row()
+
+        add_row_button = QPushButton("+ Přidat řádek")
+        add_row_button.clicked.connect(self.add_row)
+        layout.addWidget(add_row_button, 0, Qt.AlignLeft)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Přidat")
+        buttons.button(QDialogButtonBox.Cancel).setText("Zrušit")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        if self.profile_edits:
+            self.profile_edits[0].setFocus()
+
+    def add_row(self):
+        row_number = len(self.profile_edits) + 1
+        row = QHBoxLayout()
+        label = QLabel(f"Profil {row_number}:")
+        label.setMinimumWidth(58)
+        edit = QLineEdit()
+        edit.setPlaceholderText("uživatelské jméno nebo https://www.redgifs.com/users/…")
+        row.addWidget(label)
+        row.addWidget(edit, 1)
+        self.rows_layout.addLayout(row)
+        self.profile_edits.append(edit)
+
+    def values(self) -> list[str]:
+        return [
+            edit.text().strip()
+            for edit in self.profile_edits
+            if edit.text().strip()
+        ]
+
+
 class MainWindow(QMainWindow):
     def __init__(self, data_dir: Path):
         super().__init__()
@@ -600,20 +654,13 @@ class MainWindow(QMainWindow):
         return username, f"https://www.redgifs.com/users/{username}"
 
     def add_profiles(self):
-        value, ok = QInputDialog.getMultiLineText(
-            self,
-            "Přidat RedGIFs profily",
-            "Uživatelská jména nebo URL profilu, každý na nový řádek:",
-        )
-        if not ok:
+        dialog = AddProfilesDialog(self)
+        if dialog.exec() != QDialog.Accepted:
             return
 
         added = 0
         invalid: list[str] = []
-        for raw in value.replace(",", "\n").splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
+        for raw in dialog.values():
             parsed = self.parse_profile(raw)
             if parsed is None:
                 invalid.append(raw)
