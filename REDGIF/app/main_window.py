@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import re
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -312,6 +313,19 @@ class MainWindow(QMainWindow):
                 return f"{int(match.group(3))}/{int(match.group(2))}/{match.group(1)}"
             return value
 
+    @staticmethod
+    def was_checked_recently(value: str) -> bool:
+        if not value:
+            return False
+
+        try:
+            stamp = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return False
+
+        age = datetime.now() - stamp
+        return timedelta(0) <= age <= timedelta(days=30)
+
     def profile_download_dir(self, username: str) -> Path:
         base = self.storage.get_setting(
             "download_dir",
@@ -461,9 +475,12 @@ class MainWindow(QMainWindow):
                 str(downloaded_count),
                 state,
             ]
+            recent_check = self.was_checked_recently(last_scan)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.UserRole, username)
+                if recent_check:
+                    item.setBackground(QColor("#e6f4ea"))
                 if column in {3, 4}:
                     item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_index, column, item)
