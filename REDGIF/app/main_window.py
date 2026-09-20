@@ -5,7 +5,7 @@ import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1139,6 +1139,8 @@ class MainWindow(QMainWindow):
     @Slot()
     def _download_cleanup(self):
         was_batch = self._batch_mode
+        has_more_batch_items = bool(self._batch_download_queue)
+
         self.download_thread = None
         self.download_worker = None
         self.downloading_username = ""
@@ -1147,10 +1149,13 @@ class MainWindow(QMainWindow):
         self._download_redownload_all = False
 
         if was_batch:
-            if self._batch_download_queue:
-                self._start_next_batch_download()
+            # Nezakládej další QThread ani modální QMessageBox přímo uvnitř
+            # obsluhy QThread.finished. Nech Qt nejdřív dokončit cleanup
+            # právě skončeného threadu a pokračuj v dalším event-loop kroku.
+            if has_more_batch_items:
+                QTimer.singleShot(0, self._start_next_batch_download)
             else:
-                self._finish_download_batch()
+                QTimer.singleShot(0, self._finish_download_batch)
             return
 
         self.set_busy(False)
