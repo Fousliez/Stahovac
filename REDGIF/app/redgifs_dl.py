@@ -98,7 +98,12 @@ def existing_gif_ids(items: list[dict], destination: str) -> set[str]:
     return found
 
 
-def download_gif(gif_id: str, post_url: str, destination: str) -> None:
+def download_gif(
+    gif_id: str,
+    post_url: str,
+    destination: str,
+    force: bool = False,
+) -> None:
     """Stáhne právě jeden RedGIF v nejlepší dostupné kvalitě."""
     if not GIF_ID_RE.fullmatch(gif_id):
         raise RedGIFError(f"Neplatné RedGIF ID: {gif_id}")
@@ -111,12 +116,19 @@ def download_gif(gif_id: str, post_url: str, destination: str) -> None:
         "--config-ignore",
         "--no-colors",
         "--no-input",
-        "-D",
-        str(target),
-        "-f",
-        "{id}.{extension}",
-        "--filter",
-        f"id == '{gif_id}'",
-        post_url,
     ]
+    if force:
+        cmd.append("--no-skip")
+
+    cmd.extend(
+        [
+            "-D",
+            str(target),
+            "-f",
+            "{id}.{extension}",
+            "--filter",
+            f"id == '{gif_id}'",
+            post_url,
+        ]
+    )
     _run(cmd)
