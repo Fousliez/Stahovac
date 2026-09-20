@@ -314,17 +314,21 @@ class MainWindow(QMainWindow):
             return value
 
     @staticmethod
-    def was_checked_recently(value: str) -> bool:
+    def check_age_state(value: str) -> str:
         if not value:
-            return False
+            return "none"
 
         try:
             stamp = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
         except ValueError:
-            return False
+            return "none"
 
         age = datetime.now() - stamp
-        return timedelta(0) <= age <= timedelta(days=30)
+        if timedelta(0) <= age <= timedelta(days=30):
+            return "recent"
+        if age > timedelta(days=183):
+            return "old"
+        return "none"
 
     def profile_download_dir(self, username: str) -> Path:
         base = self.storage.get_setting(
@@ -475,12 +479,14 @@ class MainWindow(QMainWindow):
                 str(downloaded_count),
                 state,
             ]
-            recent_check = self.was_checked_recently(last_scan)
+            age_state = self.check_age_state(last_scan)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.UserRole, username)
-                if recent_check:
+                if age_state == "recent":
                     item.setBackground(QColor("#e6f4ea"))
+                elif age_state == "old":
+                    item.setBackground(QColor("#fce8e6"))
                 if column in {3, 4}:
                     item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_index, column, item)
