@@ -286,16 +286,19 @@ class MainWindow(QMainWindow):
         top.addWidget(subtitle)
         top.addStretch(1)
 
-        top_right = QVBoxLayout()
-        top_right.setSpacing(6)
-
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Hledat v profilech…")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setMinimumWidth(260)
+        self.search_edit.setMinimumWidth(320)
+        self.search_edit.setMaximumWidth(420)
         self.search_edit.setToolTip("Fulltextové hledání ve všech sloupcích profilů")
         self.search_edit.textChanged.connect(self.filter_profiles)
-        top_right.addWidget(self.search_edit)
+        top.addWidget(self.search_edit)
+
+        top.addStretch(1)
+
+        top_right = QVBoxLayout()
+        top_right.setSpacing(6)
 
         self.settings_button = QPushButton("Nastavení")
         self.settings_button.clicked.connect(self.open_settings)
