@@ -504,6 +504,8 @@ class MainWindow(QMainWindow):
             self.open_folder_button,
         ):
             button.setDisabled(busy)
+        if not busy:
+            self.update_profile_actions()
 
     def scan_selected_profile(self):
         username = self.selected_username()
