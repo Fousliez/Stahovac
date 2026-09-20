@@ -292,19 +292,6 @@ class MainWindow(QMainWindow):
         self.download_button.clicked.connect(self.download_new_items)
         self.delete_button.clicked.connect(self.delete_selected_profile)
 
-        progress_row = QHBoxLayout()
-        self.download_progress_label = QLabel("Stahování")
-        self.download_progress_label.setMinimumWidth(210)
-        self.download_progress_bar = QProgressBar()
-        self.download_progress_bar.setRange(0, 1)
-        self.download_progress_bar.setValue(0)
-        self.download_progress_bar.setFormat("%p%")
-        self.download_progress_label.hide()
-        self.download_progress_bar.hide()
-        progress_row.addWidget(self.download_progress_label)
-        progress_row.addWidget(self.download_progress_bar, 1)
-        layout.addLayout(progress_row)
-
         self.profile_count_label = QLabel("PROFILY: 0")
         self.profile_count_label.setObjectName("sectionTitle")
         layout.addWidget(self.profile_count_label)
@@ -359,6 +346,13 @@ class MainWindow(QMainWindow):
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+
+        self.download_progress_bar = QProgressBar()
+        self.download_progress_bar.setRange(0, 1)
+        self.download_progress_bar.setValue(0)
+        self.download_progress_bar.setFormat("Stahování • %p%")
+        self.download_progress_bar.hide()
+        layout.addWidget(self.download_progress_bar)
 
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar(self))
@@ -883,11 +877,11 @@ class MainWindow(QMainWindow):
 
         total = len(items)
         action = "Stahuji znovu" if redownload_all else "Stahuji"
-        self.download_progress_label.setText(f"{action}: 0 / {total}")
         self.download_progress_bar.setRange(0, max(1, total))
         self.download_progress_bar.setValue(0)
-        self.download_progress_bar.setFormat("%p%")
-        self.download_progress_label.show()
+        self.download_progress_bar.setFormat(
+            f"{action} %v / %m • %p%"
+        )
         self.download_progress_bar.show()
 
         profile = self.storage.profile(username) or {}
@@ -920,17 +914,13 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int, str)
     def _download_progress(self, index: int, total: int, gif_id: str):
+        del gif_id
         action = "Stahuji znovu" if self._download_redownload_all else "Stahuji"
         self.download_progress_bar.setRange(0, max(1, total))
         self.download_progress_bar.setValue(index)
-        self.download_progress_label.setText(f"{action}: {index} / {total}")
-
-        if index == 0:
-            self.statusBar().showMessage(
-                f"{action} dávkově: {total} položek…"
-            )
-        else:
-            self.statusBar().showMessage(f"{action} {index}/{total}: {gif_id}…")
+        self.download_progress_bar.setFormat(
+            f"{action} %v / %m • %p%"
+        )
 
     @Slot(str, bool, str)
     def _download_item_finished(self, _gif_id: str, success: bool, message: str):
@@ -956,23 +946,18 @@ class MainWindow(QMainWindow):
             self.select_profile(username)
         self.refresh_items()
 
-        label = "Znovu staženo" if self._download_redownload_all else "Staženo"
         total = max(downloaded + errors, self.download_progress_bar.maximum())
         if errors == 0:
             self.download_progress_bar.setValue(self.download_progress_bar.maximum())
-            self.download_progress_label.setText(
-                f"Hotovo: {downloaded} / {downloaded}"
+            self.download_progress_bar.setFormat(
+                "Hotovo %v / %m • %p%"
             )
         else:
-            self.download_progress_label.setText(
-                f"Dokončeno s chybami: {downloaded} / {total}"
+            self.download_progress_bar.setRange(0, max(1, total))
+            self.download_progress_bar.setValue(downloaded)
+            self.download_progress_bar.setFormat(
+                "Dokončeno s chybami %v / %m • %p%"
             )
-
-        self.statusBar().showMessage(
-            f"{label}: {downloaded}. Chyby: {errors}. "
-            f"Složka: {self.download_destination}",
-            7000,
-        )
 
         if errors and self._download_errors:
             QMessageBox.warning(
