@@ -256,9 +256,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.items_table, 3)
 
         hint = QLabel(
-            "Markery se ukládají společně do složky REDGIF_MARKERY "
-            "uvnitř zvolené složky pro stahování. Zůstávají tam i po smazání "
-            "videa, takže stejný RedGIF program znovu nestáhne."
+            "Stažené RedGIF ID se ukládají společně do souboru REDGIF_MARKERY.txt "
+            "uvnitř zvolené složky pro stahování. Seznam se při startu načte do "
+            "paměti, takže kontrola zůstává rychlá i při velkém počtu položek."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
