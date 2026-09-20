@@ -362,12 +362,43 @@ class MainWindow(QMainWindow):
         self.table.setCurrentCell(row, 0)
 
         menu = QMenu(self)
+        open_link_action = menu.addAction("Otevřít odkaz")
+        menu.addSeparator()
         delete_action = menu.addAction("Odstranit profil")
         delete_action.setEnabled(not self._busy)
         chosen = menu.exec(self.table.viewport().mapToGlobal(position))
 
-        if chosen == delete_action:
+        if chosen == open_link_action:
+            self.open_selected_profile_url()
+        elif chosen == delete_action:
             self.delete_selected_profile()
+
+    def open_selected_profile_url(self):
+        username = self.selected_username()
+        if not username:
+            return
+
+        profile = self.storage.profile(username)
+        if profile is None:
+            return
+
+        url = str(profile.get("url", "")).strip()
+        if not url:
+            return
+
+        try:
+            subprocess.Popen(
+                ["xdg-open", url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Otevřít odkaz",
+                f"Odkaz se nepodařilo otevřít:\n{exc}",
+            )
 
     def open_selected_profile_folder(self):
         username = self.selected_username()
