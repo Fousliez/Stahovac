@@ -463,6 +463,7 @@ class MainWindow(QMainWindow):
             downloaded_count = self.storage.downloaded_count(username, items)
             new_count = len(self.storage.new_items(username, items))
             last_scan = str(profile.get("last_scan", ""))
+            last_update = str(profile.get("last_update", ""))
 
             if not last_scan:
                 state = "Nezkontrolováno"
@@ -479,7 +480,7 @@ class MainWindow(QMainWindow):
                 str(downloaded_count),
                 state,
             ]
-            age_state = self.check_age_state(last_scan)
+            age_state = self.check_age_state(last_update)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.UserRole, username)
@@ -647,6 +648,8 @@ class MainWindow(QMainWindow):
         new_count = len(self.storage.new_items(username, items))
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.storage.update_scan_stats(username, now, len(items), new_count)
+        if new_count == 0:
+            self.storage.update_last_update(username, now)
 
         self.refresh_profiles()
         self.select_profile(username)
@@ -741,6 +744,9 @@ class MainWindow(QMainWindow):
             profile = self.storage.profile(username)
             last_scan = str(profile.get("last_scan", "")) if profile else ""
             self.storage.update_scan_stats(username, last_scan, len(items), new_count)
+            if new_count == 0:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self.storage.update_last_update(username, now)
 
         self.refresh_profiles()
         if username:
