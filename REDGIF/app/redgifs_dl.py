@@ -37,13 +37,15 @@ def _run(cmd: list[str], timeout: int = 1800) -> subprocess.CompletedProcess[str
 
 def scan_profile(profile_url: str) -> list[dict]:
     """Vrátí unikátní RedGIF ID nalezená na uživatelském profilu."""
+    # --print samo o sobě vypne stahování. Nekombinovat s --simulate:
+    # SimulationJob v gallery-dl nespouští prepare postprocessory, takže
+    # --print pak nic nevypíše, přestože profil normálně otevře.
     cmd = [
         *gallery_dl_command(),
-        "--simulate",
         "--no-colors",
         "--no-input",
         "--print",
-        "{id}",
+        "id",
         profile_url,
     ]
     process = _run(cmd)
@@ -63,10 +65,14 @@ def scan_profile(profile_url: str) -> list[dict]:
         )
 
     if not items:
-        raise RedGIFError(
-            "Profil se podařilo otevřít, ale nebyl nalezen žádný RedGIF. "
-            "Profil může být prázdný, nedostupný nebo RedGIFs změnil API."
+        detail = process.stderr.strip()
+        message = (
+            "Profil se podařilo otevřít, ale gallery-dl nevrátil žádná RedGIF ID."
         )
+        if detail:
+            message += f"\n\n{detail}"
+        raise RedGIFError(message)
+
     return list(items.values())
 
 
