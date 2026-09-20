@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -353,16 +354,28 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.table, 2)
 
         items_top = QHBoxLayout()
-        items_label = QLabel("REDGIFY")
-        items_label.setObjectName("sectionTitle")
-        items_top.addWidget(items_label)
+
+        self.items_toggle = QToolButton()
+        self.items_toggle.setText("REDGIFY")
+        self.items_toggle.setObjectName("sectionToggle")
+        self.items_toggle.setCheckable(True)
+        self.items_toggle.setChecked(False)
+        self.items_toggle.setArrowType(Qt.RightArrow)
+        self.items_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.items_toggle.clicked.connect(self.toggle_items_section)
+        items_top.addWidget(self.items_toggle)
+
         items_top.addStretch(1)
-        items_top.addWidget(QLabel("Zobrazit:"))
+
+        self.item_filter_label = QLabel("Zobrazit:")
+        self.item_filter_label.hide()
+        items_top.addWidget(self.item_filter_label)
 
         self.item_filter = QComboBox()
         for label, value in FILTERS:
             self.item_filter.addItem(label, value)
         self.item_filter.currentIndexChanged.connect(self.refresh_items)
+        self.item_filter.hide()
         items_top.addWidget(self.item_filter)
         layout.addLayout(items_top)
 
@@ -376,6 +389,7 @@ class MainWindow(QMainWindow):
         self.items_table.horizontalHeader().setStretchLastSection(True)
         self.items_table.setSortingEnabled(True)
         self.items_table.horizontalHeader().setSortIndicatorShown(True)
+        self.items_table.hide()
         layout.addWidget(self.items_table, 3)
 
         hint = QLabel(
@@ -405,6 +419,11 @@ class MainWindow(QMainWindow):
             QLabel#title { font-size: 24px; font-weight: 800; color: #18191b; }
             QLabel#subtitle { font-size: 14px; color: #6b7078; margin-left: 8px; }
             QLabel#sectionTitle { font-size: 13px; font-weight: 800; color: #30343a; }
+            QToolButton#sectionToggle {
+                background: transparent; border: 0; padding: 3px 2px;
+                font-size: 13px; font-weight: 800; color: #30343a;
+            }
+            QToolButton#sectionToggle:hover { color: #111111; }
             QLabel#hint { color: #6b7078; padding: 6px 2px; }
             QPushButton, QComboBox, QLineEdit {
                 background: #ffffff; border: 1px solid #c9ccd1; border-radius: 5px;
@@ -428,6 +447,17 @@ class MainWindow(QMainWindow):
             }
             """
         )
+
+    def toggle_items_section(self, expanded: bool):
+        self.items_toggle.setArrowType(
+            Qt.DownArrow if expanded else Qt.RightArrow
+        )
+        self.items_table.setVisible(expanded)
+        self.item_filter_label.setVisible(expanded)
+        self.item_filter.setVisible(expanded)
+
+        if expanded:
+            self.refresh_items()
 
     def selected_username(self) -> str:
         row = self.table.currentRow()
