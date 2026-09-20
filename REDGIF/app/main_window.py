@@ -256,9 +256,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.items_table, 3)
 
         hint = QLabel(
-            "Stažené RedGIF ID se ukládají společně do souboru REDGIF_MARKERY.txt "
-            "uvnitř zvolené složky pro stahování. Seznam se při startu načte do "
-            "paměti, takže kontrola zůstává rychlá i při velkém počtu položek."
+            "Stažené RedGIF ID se ukládají do jedné SQLite databáze "
+            "REDGIF_MARKERY.db ve zvolené složce pro stahování. ID jsou indexovaná "
+            "a zároveň se drží v paměti, takže kontrola zůstává rychlá i při "
+            "velkém počtu položek."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
