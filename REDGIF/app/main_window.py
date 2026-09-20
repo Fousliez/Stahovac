@@ -308,11 +308,11 @@ class MainWindow(QMainWindow):
 
         try:
             stamp = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-            return f"{stamp.month}/{stamp.year}"
+            return f"{stamp.day}/{stamp.month}/{stamp.year}"
         except ValueError:
-            match = re.match(r"^(\d{4})-(\d{1,2})", value)
+            match = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", value)
             if match:
-                return f"{int(match.group(2))}/{match.group(1)}"
+                return f"{int(match.group(3))}/{int(match.group(2))}/{match.group(1)}"
             return value
 
     def profile_download_dir(self, username: str) -> Path:
