@@ -221,11 +221,6 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 180)
-        self.table.setColumnWidth(1, 240)
-        self.table.setColumnWidth(2, 120)
-        self.table.setColumnWidth(3, 80)
-        self.table.setColumnWidth(4, 80)
         self.table.itemSelectionChanged.connect(self.refresh_items)
         self.table.itemSelectionChanged.connect(self.update_profile_actions)
         self.table.cellDoubleClicked.connect(self.edit_profile_name)
@@ -254,8 +249,6 @@ class MainWindow(QMainWindow):
         self.items_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.items_table.verticalHeader().setVisible(False)
         self.items_table.setAlternatingRowColors(True)
-        self.items_table.setColumnWidth(0, 260)
-        self.items_table.setColumnWidth(1, 130)
         self.items_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.items_table, 3)
 
@@ -478,6 +471,7 @@ class MainWindow(QMainWindow):
             if selected.casefold() == username.casefold():
                 select_row = row_index
 
+        self.table.resizeColumnsToContents()
         self.table.blockSignals(False)
 
         if select_row >= 0:
@@ -520,6 +514,8 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.UserRole, gif_id)
                 self.items_table.setItem(row_index, column, item)
 
+        self.items_table.resizeColumnToContents(0)
+        self.items_table.resizeColumnToContents(1)
         self.items_table.resizeRowsToContents()
 
     @staticmethod
