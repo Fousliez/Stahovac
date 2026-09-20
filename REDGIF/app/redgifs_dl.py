@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -145,6 +147,7 @@ def download_profile_items(
     items: list[dict],
     destination: str,
     force: bool = False,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> None:
     """Stáhne vybrané RedGIFy z profilu v jediném procesu gallery-dl."""
     ids = [
@@ -161,6 +164,7 @@ def download_profile_items(
     # gallery-dl umí Python výraz ve --filter. Tím můžeme projít profil
     # jedním procesem, ale stáhnout jen položky, které Stahovač skutečně chce.
     id_filter = f"id in {tuple(ids)!r}"
+    progress_prefix = "__STAHOVAC_DONE__"
 
     cmd = [
         *gallery_dl_command(),
@@ -177,10 +181,41 @@ def download_profile_items(
         "{id}.{extension}",
         "--filter",
         id_filter,
+        "--Print",
+        f"after:{progress_prefix}{{id}}",
     ]
     if force:
         cmd.append("--no-skip")
 
     cmd.append(profile_url)
-    _run(cmd, timeout=None)
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+        )
+    except OSError as exc:
+        raise RedGIFError(f"gallery-dl se nepodařilo spustit: {exc}") from exc
+
+    recent_output: deque[str] = deque(maxlen=80)
+    assert process.stdout is not None
+
+    for raw_line in process.stdout:
+        line = raw_line.rstrip()
+        if line.startswith(progress_prefix):
+            gif_id = line[len(progress_prefix):].strip()
+            if GIF_ID_RE.fullmatch(gif_id) and progress_callback is not None:
+                progress_callback(gif_id)
+            continue
+
+        if line:
+            recent_output.append(line)
+
+    returncode = process.wait()
+    if returncode != 0:
+        message = "\n".join(recent_output).strip() or "Neznámá chyba gallery-dl"
+        raise RedGIFError(message)
 
