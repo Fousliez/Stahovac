@@ -62,6 +62,7 @@ class Storage:
             return
         profiles.append(
             {
+                "name": "",
                 "username": username,
                 "url": url,
                 "last_scan": "",
@@ -70,6 +71,15 @@ class Storage:
             }
         )
         profiles.sort(key=lambda p: str(p.get("username", "")).casefold())
+        self._save_profiles(profiles)
+
+    def set_profile_name(self, username: str, name: str) -> None:
+        profiles = self.profiles()
+        needle = username.casefold()
+        for profile in profiles:
+            if str(profile.get("username", "")).casefold() == needle:
+                profile["name"] = name.strip()
+                break
         self._save_profiles(profiles)
 
     def delete_profile(self, username: str) -> None:
