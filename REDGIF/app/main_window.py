@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -171,9 +172,20 @@ class MainWindow(QMainWindow):
         top.addWidget(title)
         top.addWidget(subtitle)
         top.addStretch(1)
+
+        top_right = QVBoxLayout()
+        top_right.setSpacing(6)
+
         self.settings_button = QPushButton("Nastavení")
         self.settings_button.clicked.connect(self.open_settings)
-        top.addWidget(self.settings_button)
+        top_right.addWidget(self.settings_button)
+
+        self.open_folder_button = QPushButton("Otevřít složku profilu")
+        self.open_folder_button.setEnabled(False)
+        self.open_folder_button.clicked.connect(self.open_selected_profile_folder)
+        top_right.addWidget(self.open_folder_button)
+
+        top.addLayout(top_right)
         layout.addLayout(top)
 
         buttons = QHBoxLayout()
@@ -208,10 +220,11 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setColumnWidth(0, 270)
-        self.table.setColumnWidth(1, 185)
+        self.table.setColumnWidth(1, 120)
         self.table.setColumnWidth(2, 80)
         self.table.setColumnWidth(3, 80)
         self.table.itemSelectionChanged.connect(self.refresh_items)
+        self.table.itemSelectionChanged.connect(self.update_profile_actions)
         layout.addWidget(self.table, 2)
 
         items_top = QHBoxLayout()
@@ -285,16 +298,59 @@ class MainWindow(QMainWindow):
         item = self.table.item(row, 0)
         return str(item.data(Qt.UserRole) or "") if item else ""
 
+    @staticmethod
+    def format_last_scan(value: str) -> str:
+        if not value:
+            return "Ještě nezkontrolováno"
+
+        try:
+            stamp = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+            return f"{stamp.month}/{stamp.year}"
+        except ValueError:
+            match = re.match(r"^(\d{4})-(\d{1,2})", value)
+            if match:
+                return f"{int(match.group(2))}/{match.group(1)}"
+            return value
+
+    def profile_download_dir(self, username: str) -> Path:
+        base = self.storage.get_setting(
+            "download_dir",
+            str(Path.home() / "Stažené" / "RedGIF"),
+        )
+        return Path(base).expanduser() / username
+
+    def update_profile_actions(self):
+        self.open_folder_button.setEnabled(bool(self.selected_username()))
+
+    def open_selected_profile_folder(self):
+        username = self.selected_username()
+        if not username:
+            self.statusBar().showMessage("Nejdřív vyber profil.", 2500)
+            return
+
+        folder = self.profile_download_dir(username)
+        folder.mkdir(parents=True, exist_ok=True)
+
+        try:
+            subprocess.Popen(
+                ["xdg-open", str(folder)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Otevřít složku",
+                f"Složku se nepodařilo otevřít:\n{exc}",
+            )
+
     def sync_existing_files(self, username: str, items: list[dict] | None = None) -> int:
         """Převede už existující videa ve složce na markery."""
         if items is None:
             items = self.storage.load_scan(username)
 
-        base = self.storage.get_setting(
-            "download_dir",
-            str(Path.home() / "Stažené" / "RedGIF"),
-        )
-        destination = str(Path(base).expanduser() / username)
+        destination = str(self.profile_download_dir(username))
         found = existing_gif_ids(items, destination)
 
         created = 0
@@ -327,7 +383,7 @@ class MainWindow(QMainWindow):
 
             values = [
                 username,
-                last_scan or "Ještě nezkontrolováno",
+                self.format_last_scan(last_scan),
                 str(new_count),
                 str(downloaded_count),
                 state,
@@ -350,6 +406,8 @@ class MainWindow(QMainWindow):
             self.table.selectRow(0)
         else:
             self.refresh_items()
+
+        self.update_profile_actions()
 
     def refresh_items(self):
         username = self.selected_username()
@@ -443,6 +501,7 @@ class MainWindow(QMainWindow):
             self.download_button,
             self.delete_button,
             self.settings_button,
+            self.open_folder_button,
         ):
             button.setDisabled(busy)
 
@@ -538,11 +597,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(message, 5000)
             return
 
-        base = self.storage.get_setting(
-            "download_dir",
-            str(Path.home() / "Stažené" / "RedGIF"),
-        )
-        destination = str(Path(base).expanduser() / username)
+        destination = str(self.profile_download_dir(username))
 
         self.downloading_username = username
         self.download_destination = destination
