@@ -235,6 +235,12 @@ class MainWindow(QMainWindow):
         self._pending_redownload_items: list[dict] = []
         self._download_redownload_all = False
 
+        self._batch_mode = False
+        self._batch_total_profiles = 0
+        self._batch_current_position = 0
+        self._batch_download_queue: list[tuple[int, str, list[dict]]] = []
+        self._batch_download_results: list[dict] = []
+
         self.setWindowTitle(f"{APPLICATION_NAME} {BUILD_VERSION}")
         self.resize(1120, 760)
         self._build_ui()
@@ -301,7 +307,7 @@ class MainWindow(QMainWindow):
             ["Jméno", "Profil", "Poslední kontrola", "Nové", "Staženo", "Stav"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
@@ -394,6 +400,26 @@ class MainWindow(QMainWindow):
             return ""
         item = self.table.item(row, 0)
         return str(item.data(Qt.UserRole) or "") if item else ""
+
+    def selected_usernames(self) -> list[str]:
+        selection_model = self.table.selectionModel()
+        if selection_model is None:
+            username = self.selected_username()
+            return [username] if username else []
+
+        usernames: list[str] = []
+        rows = sorted(index.row() for index in selection_model.selectedRows())
+        for row in rows:
+            item = self.table.item(row, 0)
+            username = str(item.data(Qt.UserRole) or "") if item else ""
+            if username:
+                usernames.append(username)
+
+        if not usernames:
+            username = self.selected_username()
+            if username:
+                usernames.append(username)
+        return usernames
 
     @staticmethod
     def format_last_scan(value: str) -> str:
@@ -836,26 +862,138 @@ class MainWindow(QMainWindow):
                 return
 
     def download_new_items(self):
-        username = self.selected_username()
-        if not username or self.download_thread is not None or self.scan_thread is not None:
+        usernames = self.selected_usernames()
+        if (
+            not usernames
+            or self.download_thread is not None
+            or self.scan_thread is not None
+            or self._busy
+        ):
             return
 
-        all_items = self.storage.load_scan(username)
-        recognized = self.sync_existing_files(username, all_items)
-        items = self.storage.new_items(username, all_items)
-        if recognized:
-            self.refresh_profiles()
-            self.select_profile(username)
-            self.refresh_items()
+        self._batch_mode = True
+        self._batch_total_profiles = len(usernames)
+        self._batch_current_position = 0
+        self._batch_download_queue = []
+        self._batch_download_results = []
 
-        if not items:
-            message = "Žádné nové RedGIFy ke stažení."
-            if recognized:
-                message += f" {recognized} souborů už ve složce bylo a bylo označeno jako stažené."
-            self.statusBar().showMessage(message, 5000)
+        for position, username in enumerate(usernames, start=1):
+            profile = self.storage.profile(username) or {}
+            all_items = self.storage.load_scan(username)
+            self.sync_existing_files(username, all_items)
+            items = self.storage.new_items(username, all_items)
+
+            if items:
+                self._batch_download_queue.append((position, username, items))
+                continue
+
+            if not str(profile.get("last_scan", "")):
+                self._batch_download_results.append(
+                    {
+                        "position": position,
+                        "username": username,
+                        "status": "not_scanned",
+                        "downloaded": 0,
+                        "errors": 0,
+                        "message": "",
+                    }
+                )
+            else:
+                self._batch_download_results.append(
+                    {
+                        "position": position,
+                        "username": username,
+                        "status": "no_new",
+                        "downloaded": 0,
+                        "errors": 0,
+                        "message": "",
+                    }
+                )
+
+        self.refresh_profiles()
+        self.set_busy(True)
+
+        if not self._batch_download_queue:
+            self._finish_download_batch()
             return
 
+        self._start_next_batch_download()
+
+    def _start_next_batch_download(self):
+        if not self._batch_mode or self.download_thread is not None:
+            return
+
+        if not self._batch_download_queue:
+            self._finish_download_batch()
+            return
+
+        position, username, items = self._batch_download_queue.pop(0)
+        self._batch_current_position = position
         self._start_download(username, items)
+
+    def _finish_download_batch(self):
+        results = sorted(
+            self._batch_download_results,
+            key=lambda result: int(result.get("position", 0)),
+        )
+
+        completed = sum(1 for result in results if result.get("status") == "ok")
+        failed = sum(1 for result in results if result.get("status") == "error")
+        no_new = sum(1 for result in results if result.get("status") == "no_new")
+        not_scanned = sum(
+            1 for result in results if result.get("status") == "not_scanned"
+        )
+
+        lines: list[str] = []
+        for result in results:
+            username = str(result.get("username", ""))
+            status = str(result.get("status", ""))
+            downloaded = int(result.get("downloaded", 0))
+            errors = int(result.get("errors", 0))
+
+            if status == "ok":
+                lines.append(f"✓ {username} — dokončeno, staženo: {downloaded}")
+            elif status == "error":
+                lines.append(
+                    f"✗ {username} — nedokončeno, staženo: {downloaded}, chyby: {errors}"
+                )
+            elif status == "not_scanned":
+                lines.append(f"! {username} — profil ještě nebyl zkontrolován")
+            else:
+                lines.append(f"• {username} — bez nových RedGIFů")
+
+        self.download_progress_bar.setRange(0, max(1, self._batch_total_profiles))
+        self.download_progress_bar.setValue(self._batch_total_profiles)
+        self.download_progress_bar.setFormat("Dávka dokončena • %p%")
+        self.download_progress_bar.show()
+
+        summary = (
+            f"Dokončeno: {completed}\n"
+            f"Chyba: {failed}\n"
+            f"Bez nových: {no_new}\n"
+            f"Nezkontrolováno: {not_scanned}\n\n"
+            + "\n".join(lines)
+        )
+
+        self._batch_mode = False
+        self._batch_download_queue = []
+        self._batch_download_results = []
+        self._batch_total_profiles = 0
+        self._batch_current_position = 0
+        self.set_busy(False)
+
+        if failed or not_scanned:
+            QMessageBox.warning(
+                self,
+                "Stahování profilů dokončeno",
+                summary,
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Stahování profilů dokončeno",
+                summary,
+            )
 
     def _start_download(
         self,
@@ -879,9 +1017,15 @@ class MainWindow(QMainWindow):
         action = "Stahuji znovu" if redownload_all else "Stahuji"
         self.download_progress_bar.setRange(0, max(1, total))
         self.download_progress_bar.setValue(0)
-        self.download_progress_bar.setFormat(
-            f"{action} %v / %m • %p%"
-        )
+        if self._batch_mode:
+            self.download_progress_bar.setFormat(
+                f"Profil {self._batch_current_position}/{self._batch_total_profiles} "
+                f"• {username} • %v/%m • %p%"
+            )
+        else:
+            self.download_progress_bar.setFormat(
+                f"{action} %v / %m • %p%"
+            )
         self.download_progress_bar.show()
 
         profile = self.storage.profile(username) or {}
@@ -918,9 +1062,15 @@ class MainWindow(QMainWindow):
         action = "Stahuji znovu" if self._download_redownload_all else "Stahuji"
         self.download_progress_bar.setRange(0, max(1, total))
         self.download_progress_bar.setValue(index)
-        self.download_progress_bar.setFormat(
-            f"{action} %v / %m • %p%"
-        )
+        if self._batch_mode:
+            self.download_progress_bar.setFormat(
+                f"Profil {self._batch_current_position}/{self._batch_total_profiles} "
+                f"• {self.downloading_username} • %v/%m • %p%"
+            )
+        else:
+            self.download_progress_bar.setFormat(
+                f"{action} %v / %m • %p%"
+            )
 
     @Slot(str, bool, str)
     def _download_item_finished(self, _gif_id: str, success: bool, message: str):
@@ -959,6 +1109,19 @@ class MainWindow(QMainWindow):
                 "Dokončeno s chybami %v / %m • %p%"
             )
 
+        if self._batch_mode:
+            self._batch_download_results.append(
+                {
+                    "position": self._batch_current_position,
+                    "username": username,
+                    "status": "ok" if errors == 0 else "error",
+                    "downloaded": downloaded,
+                    "errors": errors,
+                    "message": "\n\n".join(self._download_errors[:5]),
+                }
+            )
+            return
+
         if errors and self._download_errors:
             QMessageBox.warning(
                 self,
@@ -975,13 +1138,22 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _download_cleanup(self):
-        self.set_busy(False)
+        was_batch = self._batch_mode
         self.download_thread = None
         self.download_worker = None
         self.downloading_username = ""
         self.download_destination = ""
         self._download_errors = []
         self._download_redownload_all = False
+
+        if was_batch:
+            if self._batch_download_queue:
+                self._start_next_batch_download()
+            else:
+                self._finish_download_batch()
+            return
+
+        self.set_busy(False)
 
     def delete_selected_profile(self):
         if self._busy:
