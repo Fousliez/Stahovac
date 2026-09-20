@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -201,7 +199,7 @@ class MainWindow(QMainWindow):
 
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ["Profil", "Poslední kontrola", "Nové", "Celkem", "Stav"]
+            ["Profil", "Poslední kontrola", "Nové", "Staženo", "Stav"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -230,13 +228,6 @@ class MainWindow(QMainWindow):
         items_top.addWidget(self.item_filter)
         layout.addLayout(items_top)
 
-        item_buttons = QHBoxLayout()
-        self.open_item_button = QPushButton("Otevřít RedGIF")
-        item_buttons.addWidget(self.open_item_button)
-        item_buttons.addStretch(1)
-        self.open_item_button.clicked.connect(self.open_selected_item)
-        layout.addLayout(item_buttons)
-
         self.items_table = QTableWidget(0, 3)
         self.items_table.setHorizontalHeaderLabels(["RedGIF ID", "Stav", "Odkaz"])
         self.items_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -247,15 +238,12 @@ class MainWindow(QMainWindow):
         self.items_table.setColumnWidth(0, 260)
         self.items_table.setColumnWidth(1, 130)
         self.items_table.horizontalHeader().setStretchLastSection(True)
-        self.items_table.cellDoubleClicked.connect(
-            lambda *_args: self.open_selected_item()
-        )
         layout.addWidget(self.items_table, 3)
 
         hint = QLabel(
-            "Po úspěšném stažení vznikne v datové složce programu prázdný marker "
-            "ID.done. Marker zůstává i po smazání videa, takže stejný RedGIF už "
-            "program znovu nestáhne."
+            "Markery se ukládají společně do skryté složky .redgif_markers "
+            "uvnitř zvolené složky pro stahování. Zůstávají tam i po smazání "
+            "videa, takže stejný RedGIF program znovu nestáhne."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -297,20 +285,6 @@ class MainWindow(QMainWindow):
         item = self.table.item(row, 0)
         return str(item.data(Qt.UserRole) or "") if item else ""
 
-    def selected_item(self) -> dict | None:
-        username = self.selected_username()
-        row = self.items_table.currentRow()
-        if not username or row < 0:
-            return None
-        item = self.items_table.item(row, 0)
-        if item is None:
-            return None
-        gif_id = str(item.data(Qt.UserRole) or "")
-        for value in self.storage.load_scan(username):
-            if str(value.get("id", "")) == gif_id:
-                return value
-        return None
-
     def sync_existing_files(self, username: str, items: list[dict] | None = None) -> int:
         """Převede už existující videa ve složce na markery."""
         if items is None:
@@ -339,8 +313,9 @@ class MainWindow(QMainWindow):
 
         for row_index, profile in enumerate(profiles):
             username = str(profile.get("username", ""))
-            total = len(self.storage.load_scan(username))
-            new_count = len(self.storage.new_items(username))
+            items = self.storage.load_scan(username)
+            downloaded_count = self.storage.downloaded_count(username, items)
+            new_count = len(self.storage.new_items(username, items))
             last_scan = str(profile.get("last_scan", ""))
 
             if not last_scan:
@@ -354,7 +329,7 @@ class MainWindow(QMainWindow):
                 username,
                 last_scan or "Ještě nezkontrolováno",
                 str(new_count),
-                str(total),
+                str(downloaded_count),
                 state,
             ]
             for column, value in enumerate(values):
@@ -635,39 +610,6 @@ class MainWindow(QMainWindow):
         self.downloading_username = ""
         self.download_destination = ""
         self._download_errors = []
-
-    def open_selected_item(self):
-        item = self.selected_item()
-        if item is None:
-            self.statusBar().showMessage("Nejdřív vyber RedGIF v tabulce.", 3000)
-            return
-
-        url = str(item.get("url", "")).strip()
-        if not url:
-            QMessageBox.warning(self, "Otevřít RedGIF", "U vybrané položky chybí odkaz.")
-            return
-
-        try:
-            subprocess.Popen(
-                ["xdg-open", url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            self.statusBar().showMessage("Otevírám RedGIF v prohlížeči…", 2500)
-            return
-        except FileNotFoundError:
-            pass
-        except Exception as exc:
-            QMessageBox.warning(self, "Otevřít RedGIF", f"Odkaz se nepodařilo otevřít:\n{exc}")
-            return
-
-        if not QDesktopServices.openUrl(QUrl(url)):
-            QMessageBox.warning(
-                self,
-                "Otevřít RedGIF",
-                "Odkaz se nepodařilo otevřít v systémovém prohlížeči.",
-            )
 
     def delete_selected_profile(self):
         username = self.selected_username()
