@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
+import threading
 from pathlib import Path
 
 
@@ -18,8 +20,9 @@ class Storage:
         self.legacy_markers_dir = self.data_dir / "markers"
         self.scans_dir.mkdir(parents=True, exist_ok=True)
 
+        self._marker_lock = threading.RLock()
         self._marker_ids: set[str] = set()
-        self._load_or_migrate_markers()
+        self._init_marker_database()
 
     @staticmethod
     def _read_json(path: Path, default):
@@ -100,8 +103,8 @@ class Storage:
             scan_path.unlink()
         except FileNotFoundError:
             pass
-        # Společný seznam markerů záměrně nemažeme. Při opětovném přidání
-        # profilu tak program stále ví, co už bylo v minulosti staženo.
+        # Záznamy v databázi záměrně nemažeme. Při opětovném přidání profilu
+        # tak program stále ví, co už bylo v minulosti staženo.
 
     def update_scan_stats(self, username: str, last_scan: str, total: int, new: int) -> None:
         profiles = self.profiles()
@@ -130,16 +133,19 @@ class Storage:
         self._write_json(self.settings_file, data)
 
         if key == "download_dir":
-            new_file = self.marker_file()
-            new_ids = self._read_marker_file(new_file)
-            self._marker_ids = (existing_ids or set()) | new_ids
+            db_path = self.marker_database()
+            database_was_new = not db_path.exists()
+            self._ensure_marker_schema(db_path)
 
-            # Pokud je v nově zvolené složce ještě starý adresář s .done
-            # markery, vezmeme ho při změně cesty také.
-            self._marker_ids |= self._read_done_markers(
-                new_file.parent / "REDGIF_MARKERY"
-            )
-            self._write_marker_file(new_file, self._marker_ids)
+            ids = self._read_database_ids(db_path)
+            if database_was_new:
+                ids |= self._read_legacy_ids(db_path.parent)
+
+            ids |= existing_ids or set()
+            self._insert_marker_ids(db_path, ids)
+
+            with self._marker_lock:
+                self._marker_ids = ids
 
     def scan_path(self, username: str) -> Path:
         return self.scans_dir / f"{self.safe_name(username)}.json"
@@ -151,73 +157,144 @@ class Storage:
         data = self._read_json(self.scan_path(username), [])
         return data if isinstance(data, list) else []
 
-    def marker_file(self) -> Path:
+    def marker_database(self) -> Path:
         default_dir = str(Path.home() / "Stažené" / "RedGIF")
         download_dir = Path(
             self.get_setting("download_dir", default_dir)
         ).expanduser()
-        return download_dir / "REDGIF_MARKERY.txt"
+        return download_dir / "REDGIF_MARKERY.db"
 
     def is_marked(self, username: str, gif_id: str) -> bool:
         del username
         marker_id = self.normalize_marker_id(gif_id)
-        return bool(marker_id) and marker_id in self._marker_ids
+        if not marker_id:
+            return False
+        with self._marker_lock:
+            return marker_id in self._marker_ids
 
     def mark(self, username: str, gif_id: str) -> None:
-        del username
         marker_id = self.normalize_marker_id(gif_id)
-        if not marker_id or marker_id in self._marker_ids:
+        if not marker_id:
             return
 
-        path = self.marker_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(marker_id + "\n")
+        with self._marker_lock:
+            if marker_id in self._marker_ids:
+                return
 
-        self._marker_ids.add(marker_id)
+            db_path = self.marker_database()
+            self._ensure_marker_schema(db_path)
+            with sqlite3.connect(db_path, timeout=30) as connection:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO downloads (id, profile)
+                    VALUES (?, ?)
+                    """,
+                    (marker_id, username),
+                )
+                connection.commit()
+
+            self._marker_ids.add(marker_id)
 
     def downloaded_count(self, username: str, items: list[dict] | None = None) -> int:
         if items is None:
             items = self.load_scan(username)
-        return sum(
-            1
-            for item in items
-            if self.is_marked(username, str(item.get("id", "")))
-        )
+
+        with self._marker_lock:
+            marker_ids = self._marker_ids
+            return sum(
+                1
+                for item in items
+                if self.normalize_marker_id(str(item.get("id", ""))) in marker_ids
+            )
 
     def new_items(self, username: str, items: list[dict] | None = None) -> list[dict]:
         if items is None:
             items = self.load_scan(username)
-        return [
-            item for item in items
-            if not self.is_marked(username, str(item.get("id", "")))
-        ]
 
-    def _load_or_migrate_markers(self) -> None:
-        marker_file = self.marker_file()
+        with self._marker_lock:
+            marker_ids = self._marker_ids
+            return [
+                item
+                for item in items
+                if self.normalize_marker_id(str(item.get("id", ""))) not in marker_ids
+            ]
 
-        if marker_file.exists():
-            self._marker_ids = self._read_marker_file(marker_file)
+    def _init_marker_database(self) -> None:
+        db_path = self.marker_database()
+        database_was_new = not db_path.exists()
+        self._ensure_marker_schema(db_path)
+
+        ids = self._read_database_ids(db_path)
+        if database_was_new:
+            ids |= self._read_legacy_ids(db_path.parent)
+            self._insert_marker_ids(db_path, ids)
+
+        with self._marker_lock:
+            self._marker_ids = ids
+
+    @staticmethod
+    def _ensure_marker_schema(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path, timeout=30) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS downloads (
+                    id TEXT PRIMARY KEY,
+                    profile TEXT,
+                    downloaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_downloads_profile ON downloads(profile)"
+            )
+            connection.commit()
+
+    def _read_database_ids(self, path: Path) -> set[str]:
+        if not path.exists():
+            return set()
+        try:
+            with sqlite3.connect(path, timeout=30) as connection:
+                rows = connection.execute("SELECT id FROM downloads").fetchall()
+        except sqlite3.Error:
+            return set()
+
+        return {
+            marker_id
+            for (raw_id,) in rows
+            if (marker_id := self.normalize_marker_id(str(raw_id)))
+        }
+
+    def _insert_marker_ids(self, path: Path, ids: set[str]) -> None:
+        if not ids:
             return
 
-        # Jednorázový převod ze starších verzí:
-        # 1) data/markers/<profil>/*.done
-        # 2) <složka pro stahování>/REDGIF_MARKERY/*.done
-        ids = self._read_done_markers(self.legacy_markers_dir)
-        ids |= self._read_done_markers(marker_file.parent / "REDGIF_MARKERY")
+        self._ensure_marker_schema(path)
+        rows = [(marker_id,) for marker_id in ids]
+        with sqlite3.connect(path, timeout=30) as connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO downloads (id) VALUES (?)",
+                rows,
+            )
+            connection.commit()
 
-        self._marker_ids = ids
-        self._write_marker_file(marker_file, ids)
+    def _read_legacy_ids(self, download_dir: Path) -> set[str]:
+        ids = self._read_marker_text_file(download_dir / "REDGIF_MARKERY.txt")
+        ids |= self._read_done_markers(download_dir / "REDGIF_MARKERY")
+        ids |= self._read_done_markers(self.legacy_markers_dir)
+        return ids
 
-    def _read_marker_file(self, path: Path) -> set[str]:
+    def _read_marker_text_file(self, path: Path) -> set[str]:
         try:
-            return {
-                marker_id
-                for line in path.read_text(encoding="utf-8").splitlines()
-                if (marker_id := self.normalize_marker_id(line))
-            }
+            lines = path.read_text(encoding="utf-8").splitlines()
         except (FileNotFoundError, OSError):
             return set()
+
+        return {
+            marker_id
+            for line in lines
+            if (marker_id := self.normalize_marker_id(line))
+        }
 
     def _read_done_markers(self, directory: Path) -> set[str]:
         if not directory.is_dir():
@@ -228,11 +305,3 @@ class Storage:
             for path in directory.rglob("*.done")
             if (marker_id := self.normalize_marker_id(path.stem))
         }
-
-    @staticmethod
-    def _write_marker_file(path: Path, ids: set[str]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp = path.with_suffix(path.suffix + ".tmp")
-        content = "".join(f"{marker_id}\n" for marker_id in sorted(ids))
-        temp.write_text(content, encoding="utf-8")
-        temp.replace(path)
