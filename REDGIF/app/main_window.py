@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -904,3 +904,22 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.storage, self)
         if dialog.exec() == QDialog.Accepted:
             self.statusBar().showMessage("Nastavení uloženo.", 2500)
+
+    def closeEvent(self, event: QCloseEvent):
+        if self.download_thread is None:
+            event.accept()
+            return
+
+        result = QMessageBox.question(
+            self,
+            "Probíhá stahování",
+            "Právě probíhá stahování. Opravdu chcete program ukončit?\n\n"
+            "Probíhající stahování bude přerušeno.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if result == QMessageBox.Yes:
+            event.accept()
+        else:
+            event.ignore()
