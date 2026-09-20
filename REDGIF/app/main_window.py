@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .redgifs_dl import download_gif, existing_gif_ids, scan_profile
+from .redgifs_dl import download_profile_items, existing_gif_ids, scan_profile
 from .storage import Storage
 from .version import APPLICATION_NAME, BUILD_VERSION
 
@@ -66,6 +66,7 @@ class DownloadWorker(QObject):
     def __init__(
         self,
         username: str,
+        profile_url: str,
         items: list[dict],
         destination: str,
         storage: Storage,
@@ -73,6 +74,7 @@ class DownloadWorker(QObject):
     ):
         super().__init__()
         self.username = username
+        self.profile_url = profile_url
         self.items = items
         self.destination = destination
         self.storage = storage
@@ -80,28 +82,45 @@ class DownloadWorker(QObject):
 
     @Slot()
     def run(self):
-        downloaded = 0
-        errors = 0
         total = len(self.items)
+        self.progress.emit(0, total, "")
 
-        for index, item in enumerate(self.items, start=1):
-            gif_id = str(item["id"])
-            self.progress.emit(index, total, gif_id)
-            try:
-                download_gif(
-                    gif_id,
-                    str(item["url"]),
-                    self.destination,
-                    force=self.force,
-                )
-                self.storage.mark(self.username, gif_id)
-                downloaded += 1
-                self.item_finished.emit(gif_id, True, "")
-            except Exception as exc:
-                errors += 1
-                self.item_finished.emit(gif_id, False, str(exc))
+        existing_before = (
+            existing_gif_ids(self.items, self.destination)
+            if not self.force
+            else set()
+        )
 
-        self.finished.emit(downloaded, errors)
+        try:
+            download_profile_items(
+                self.profile_url,
+                self.items,
+                self.destination,
+                force=self.force,
+            )
+        except Exception as exc:
+            if self.force:
+                self.item_finished.emit("", False, str(exc))
+                self.finished.emit(0, 1)
+                return
+
+            existing_after = existing_gif_ids(self.items, self.destination)
+            completed = existing_after - existing_before
+            for item in self.items:
+                gif_id = str(item.get("id", ""))
+                if gif_id in completed:
+                    self.storage.mark(self.username, gif_id)
+
+            remaining = max(1, total - len(completed))
+            self.item_finished.emit("", False, str(exc))
+            self.finished.emit(len(completed), remaining)
+            return
+
+        for item in self.items:
+            gif_id = str(item.get("id", ""))
+            self.storage.mark(self.username, gif_id)
+
+        self.finished.emit(total, 0)
 
 
 class SettingsDialog(QDialog):
@@ -796,9 +815,15 @@ class MainWindow(QMainWindow):
         self._download_redownload_all = redownload_all
         self.set_busy(True)
 
+        profile = self.storage.profile(username) or {}
+        profile_url = str(
+            profile.get("url", f"https://www.redgifs.com/users/{username}")
+        )
+
         thread = QThread(self)
         worker = DownloadWorker(
             username,
+            profile_url,
             items,
             destination,
             self.storage,
@@ -821,7 +846,12 @@ class MainWindow(QMainWindow):
     @Slot(int, int, str)
     def _download_progress(self, index: int, total: int, gif_id: str):
         action = "Stahuji znovu" if self._download_redownload_all else "Stahuji"
-        self.statusBar().showMessage(f"{action} {index}/{total}: {gif_id}…")
+        if index == 0:
+            self.statusBar().showMessage(
+                f"{action} dávkově: {total} položek…"
+            )
+        else:
+            self.statusBar().showMessage(f"{action} {index}/{total}: {gif_id}…")
 
     @Slot(str, bool, str)
     def _download_item_finished(self, _gif_id: str, success: bool, message: str):
