@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="$ROOT_DIR/logs"
+mkdir -p "$LOG_DIR"
+
+launch_detached() {
+  local script="$1"
+  local log_file="$2"
+
+  nohup setsid bash "$script" >"$log_file" 2>&1 < /dev/null &
+  disown || true
+  exit 0
+}
 
 launch_instagram() {
-  exec bash "$ROOT_DIR/INSTAGRAM/start_app.sh"
+  launch_detached "$ROOT_DIR/INSTAGRAM/start_app.sh" "$LOG_DIR/instagram.log"
 }
 
 launch_redgif() {
-  exec bash "$ROOT_DIR/REDGIF/start_app.sh"
+  launch_detached "$ROOT_DIR/REDGIF/start_app.sh" "$LOG_DIR/redgif.log"
 }
 
 if command -v yad >/dev/null 2>&1; then
