@@ -43,6 +43,23 @@ FILTERS = [
 ]
 
 
+class SortableTableWidgetItem(QTableWidgetItem):
+    def __init__(self, text: str, sort_value=None):
+        super().__init__(text)
+        self.sort_value = (
+            text.casefold() if sort_value is None and isinstance(text, str)
+            else sort_value
+        )
+
+    def __lt__(self, other):
+        if isinstance(other, SortableTableWidgetItem):
+            try:
+                return self.sort_value < other.sort_value
+            except TypeError:
+                return str(self.sort_value).casefold() < str(other.sort_value).casefold()
+        return super().__lt__(other)
+
+
 class ScanWorker(QObject):
     finished = Signal(list)
     failed = Signal(str)
@@ -312,6 +329,8 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setSortingEnabled(True)
+        self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.itemSelectionChanged.connect(self.refresh_items)
         self.table.itemSelectionChanged.connect(self.update_profile_actions)
         self.table.cellDoubleClicked.connect(self.edit_profile_name)
@@ -341,6 +360,8 @@ class MainWindow(QMainWindow):
         self.items_table.verticalHeader().setVisible(False)
         self.items_table.setAlternatingRowColors(True)
         self.items_table.horizontalHeader().setStretchLastSection(True)
+        self.items_table.setSortingEnabled(True)
+        self.items_table.horizontalHeader().setSortIndicatorShown(True)
         layout.addWidget(self.items_table, 3)
 
         hint = QLabel(
@@ -579,9 +600,14 @@ class MainWindow(QMainWindow):
         profiles = self.storage.profiles()
         self.profile_count_label.setText(f"PROFILY: {len(profiles)}")
         selected = self.selected_username()
+
+        sorting_enabled = self.table.isSortingEnabled()
+        sort_column = self.table.horizontalHeader().sortIndicatorSection()
+        sort_order = self.table.horizontalHeader().sortIndicatorOrder()
+
         self.table.blockSignals(True)
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(profiles))
-        select_row = -1
 
         for row_index, profile in enumerate(profiles):
             username = str(profile.get("username", ""))
@@ -607,9 +633,18 @@ class MainWindow(QMainWindow):
                 str(downloaded_count),
                 state,
             ]
+            sort_values = [
+                custom_name.casefold(),
+                username.casefold(),
+                last_scan,
+                new_count,
+                downloaded_count,
+                state.casefold(),
+            ]
+
             age_state = self.check_age_state(last_update)
             for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
+                item = SortableTableWidgetItem(value, sort_values[column])
                 item.setData(Qt.UserRole, username)
                 if age_state == "recent":
                     item.setBackground(QColor("#e6f4ea"))
@@ -619,14 +654,14 @@ class MainWindow(QMainWindow):
                     item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_index, column, item)
 
-            if selected.casefold() == username.casefold():
-                select_row = row_index
-
         self.table.resizeColumnsToContents()
+        self.table.setSortingEnabled(sorting_enabled)
+        if sorting_enabled and sort_column >= 0:
+            self.table.sortItems(sort_column, sort_order)
         self.table.blockSignals(False)
 
-        if select_row >= 0:
-            self.table.selectRow(select_row)
+        if selected:
+            self.select_profile(selected)
         elif profiles:
             self.table.selectRow(0)
         else:
@@ -640,6 +675,10 @@ class MainWindow(QMainWindow):
             self.items_table.setRowCount(0)
             return
 
+        sorting_enabled = self.items_table.isSortingEnabled()
+        sort_column = self.items_table.horizontalHeader().sortIndicatorSection()
+        sort_order = self.items_table.horizontalHeader().sortIndicatorOrder()
+
         filter_value = self.item_filter.currentData()
         items = self.storage.load_scan(username)
         rows: list[tuple[dict, bool]] = []
@@ -652,22 +691,29 @@ class MainWindow(QMainWindow):
                 continue
             rows.append((item, downloaded))
 
+        self.items_table.setSortingEnabled(False)
         self.items_table.setRowCount(len(rows))
         for row_index, (item_data, downloaded) in enumerate(rows):
             gif_id = str(item_data.get("id", ""))
-            values = [
-                gif_id,
-                "Stažený" if downloaded else "NOVÝ",
-                str(item_data.get("url", "")),
+            status = "Stažený" if downloaded else "NOVÝ"
+            url = str(item_data.get("url", ""))
+            values = [gif_id, status, url]
+            sort_values = [
+                gif_id.casefold(),
+                1 if downloaded else 0,
+                url.casefold(),
             ]
             for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
+                item = SortableTableWidgetItem(value, sort_values[column])
                 item.setData(Qt.UserRole, gif_id)
                 self.items_table.setItem(row_index, column, item)
 
         self.items_table.resizeColumnToContents(0)
         self.items_table.resizeColumnToContents(1)
         self.items_table.resizeRowsToContents()
+        self.items_table.setSortingEnabled(sorting_enabled)
+        if sorting_enabled and sort_column >= 0:
+            self.items_table.sortItems(sort_column, sort_order)
 
     @staticmethod
     def parse_profile(raw: str) -> tuple[str, str] | None:
