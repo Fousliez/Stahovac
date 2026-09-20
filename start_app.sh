@@ -1,38 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-launch_choice() {
-  local choice=""
-
-  if command -v yad >/dev/null 2>&1; then
-    choice="$(yad       --title="Stahovač"       --width=360       --height=180       --center       --list       --radiolist       --column=""       --column="Stahovač"       TRUE "Instagram"       FALSE "RedGIF"       --button="Spustit:0"       --button="Zrušit:1"       --print-column=2 2>/dev/null || true)"
-  elif command -v zenity >/dev/null 2>&1; then
-    choice="$(zenity       --list       --radiolist       --title="Stahovač"       --text="Vyber, co chceš spustit:"       --column=""       --column="Stahovač"       TRUE "Instagram"       FALSE "RedGIF" 2>/dev/null || true)"
-  else
-    printf '\nStahovač\n'
-    printf '1) Instagram\n'
-    printf '2) RedGIF\n'
-    printf '0) Konec\n\n'
-    read -r -p "Vyber: " answer
-    case "$answer" in
-      1) choice="Instagram" ;;
-      2) choice="RedGIF" ;;
-      *) exit 0 ;;
-    esac
-  fi
-
-  case "$choice" in
-    Instagram)
-      exec bash "$PWD/INSTAGRAM/start_app.sh"
-      ;;
-    RedGIF)
-      exec bash "$PWD/REDGIF/start_app.sh"
-      ;;
-    *)
-      exit 0
-      ;;
-  esac
+launch_instagram() {
+  exec bash "$ROOT_DIR/INSTAGRAM/start_app.sh"
 }
 
-launch_choice
+launch_redgif() {
+  exec bash "$ROOT_DIR/REDGIF/start_app.sh"
+}
+
+if command -v yad >/dev/null 2>&1; then
+  set +e
+  yad     --title="Stahovač"     --text="<b>Co chceš spustit?</b>"     --width=360     --height=150     --center     --button="Instagram:10"     --button="RedGIF:20"     --button="Zrušit:1"
+  code=$?
+  set -e
+
+  case "$code" in
+    10) launch_instagram ;;
+    20) launch_redgif ;;
+    *) exit 0 ;;
+  esac
+
+elif command -v zenity >/dev/null 2>&1; then
+  choice="$(zenity     --list     --radiolist     --title="Stahovač"     --text="Vyber, co chceš spustit:"     --column=""     --column="Stahovač"     TRUE "Instagram"     FALSE "RedGIF" 2>/dev/null || true)"
+
+  choice="${choice%%|*}"
+  case "$choice" in
+    Instagram) launch_instagram ;;
+    RedGIF) launch_redgif ;;
+    *) exit 0 ;;
+  esac
+
+else
+  printf '\nStahovač\n'
+  printf '1) Instagram\n'
+  printf '2) RedGIF\n'
+  printf '0) Konec\n\n'
+  read -r -p "Vyber: " answer
+
+  case "$answer" in
+    1) launch_instagram ;;
+    2) launch_redgif ;;
+    *) exit 0 ;;
+  esac
+fi
