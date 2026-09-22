@@ -12,9 +12,29 @@ class PornhubDownloadError(RuntimeError):
 
 
 QUALITY_FORMATS = {
-    "best": "best",
-    "1080": "best[height<=1080]/best",
-    "720": "best[height<=720]/best",
+    # Pornhub má aktuálně problém s HLS/m3u8 (HTTP 410), zatímco
+    # přímé MP4/HTTPS formáty často zůstávají dostupné. Proto je
+    # záměrně vybíráme před HLS.
+    "best": (
+        "best[protocol=https][ext=mp4]/"
+        "best[protocol=http][ext=mp4]/"
+        "best[protocol=https]/"
+        "best[protocol=http]/best"
+    ),
+    "1080": (
+        "best[height<=1080][protocol=https][ext=mp4]/"
+        "best[height<=1080][protocol=http][ext=mp4]/"
+        "best[height<=1080][protocol=https]/"
+        "best[height<=1080][protocol=http]/"
+        "best[height<=1080]/best"
+    ),
+    "720": (
+        "best[height<=720][protocol=https][ext=mp4]/"
+        "best[height<=720][protocol=http][ext=mp4]/"
+        "best[height<=720][protocol=https]/"
+        "best[height<=720][protocol=http]/"
+        "best[height<=720]/best"
+    ),
 }
 
 
@@ -66,6 +86,9 @@ def download_url(
         "quiet": True,
         "no_warnings": False,
         "progress_hooks": [hook],
+        "http_headers": {
+            "Referer": "https://www.pornhub.com/",
+        },
     }
     if cookies_file.strip():
         options["cookiefile"] = str(Path(cookies_file).expanduser())
