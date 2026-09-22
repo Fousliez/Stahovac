@@ -34,6 +34,23 @@ from .storage import Storage
 from .version import APPLICATION_NAME, BUILD_VERSION
 
 
+class SortableTableWidgetItem(QTableWidgetItem):
+    def __init__(self, text: str, sort_value=None):
+        super().__init__(text)
+        self.sort_value = (
+            text.casefold() if sort_value is None and isinstance(text, str)
+            else sort_value
+        )
+
+    def __lt__(self, other):
+        if isinstance(other, SortableTableWidgetItem):
+            try:
+                return self.sort_value < other.sort_value
+            except TypeError:
+                return str(self.sort_value).casefold() < str(other.sort_value).casefold()
+        return super().__lt__(other)
+
+
 class DownloadWorker(QObject):
     item_started = Signal(str, int, int)
     item_progress = Signal(str, int, str)
@@ -264,6 +281,8 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSortingEnabled(True)
+        self.table.horizontalHeader().setSortIndicatorShown(True)
+        self.table.horizontalHeader().setSortIndicator(0, Qt.AscendingOrder)
         self.table.cellDoubleClicked.connect(self.open_row_url)
         layout.addWidget(self.table, 1)
 
@@ -319,23 +338,57 @@ class MainWindow(QMainWindow):
     def refresh_jobs(self):
         jobs = self.storage.jobs()
         current = {url for url in self.selected_urls()}
+
+        sorting_enabled = self.table.isSortingEnabled()
+        sort_column = self.table.horizontalHeader().sortIndicatorSection()
+        sort_order = self.table.horizontalHeader().sortIndicatorOrder()
+
+        self.table.blockSignals(True)
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(jobs))
+
         for row, job in enumerate(jobs):
+            title = str(job.get("title") or "Nezjištěno")
+            url = str(job.get("url") or "")
+            status = str(job.get("status") or "Připraveno")
+            progress = int(job.get("progress") or 0)
+            last_run = str(job.get("last_run") or "")
+
             values = [
-                str(job.get("title") or "Nezjištěno"),
-                str(job.get("url") or ""),
-                str(job.get("status") or "Připraveno"),
-                f"{int(job.get('progress') or 0)} %",
-                str(job.get("last_run") or ""),
+                title,
+                url,
+                status,
+                f"{progress} %",
+                last_run,
             ]
+
+            try:
+                last_run_sort = datetime.strptime(last_run, "%d/%m/%Y %H:%M").timestamp()
+            except ValueError:
+                last_run_sort = 0
+
+            sort_values = [
+                title.casefold(),
+                url.casefold(),
+                status.casefold(),
+                progress,
+                last_run_sort,
+            ]
+
             for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setData(Qt.UserRole, str(job.get("url") or ""))
+                item = SortableTableWidgetItem(value, sort_values[column])
+                item.setData(Qt.UserRole, url)
                 self.table.setItem(row, column, item)
-            if str(job.get("url") or "") in current:
+
+            if url in current:
                 self.table.selectRow(row)
-        self.table.setSortingEnabled(True)
+
+        self.table.resizeColumnsToContents()
+        self.table.setSortingEnabled(sorting_enabled)
+        if sorting_enabled and sort_column >= 0:
+            self.table.sortItems(sort_column, sort_order)
+        self.table.blockSignals(False)
+
         self.count_label.setText(f"ODKAZY: {len(jobs)}")
         self.filter_jobs(self.search_edit.text())
 
