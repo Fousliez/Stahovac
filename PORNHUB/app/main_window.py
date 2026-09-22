@@ -53,7 +53,7 @@ class SortableTableWidgetItem(QTableWidgetItem):
 
 class DownloadWorker(QObject):
     item_started = Signal(str, int, int)
-    item_progress = Signal(str, int, str)
+    item_progress = Signal(str, int, str, int, int, int, int)
     item_finished = Signal(str, bool, str, str)
     finished = Signal(int, int)
 
@@ -81,11 +81,25 @@ class DownloadWorker(QObject):
         for index, url in enumerate(self.urls, start=1):
             self.item_started.emit(url, index, total)
 
-            def progress(percent: int, status: str, title: str):
+            def progress(
+                percent: int,
+                status: str,
+                title: str,
+                video_index: int,
+                video_total: int,
+            ):
                 label = "Stahuji"
                 if status == "finished":
                     label = "Dokončuji"
-                self.item_progress.emit(url, percent, title or label)
+                self.item_progress.emit(
+                    url,
+                    percent,
+                    title or label,
+                    index,
+                    total,
+                    video_index,
+                    video_total,
+                )
 
             try:
                 title = download_url(
@@ -293,6 +307,12 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         layout.addWidget(self.progress)
 
+        self.download_info_label = QLabel("")
+        self.download_info_label.setObjectName("downloadInfo")
+        self.download_info_label.setWordWrap(True)
+        self.download_info_label.hide()
+        layout.addWidget(self.download_info_label)
+
         hint = QLabel(
             "Stažené položky hlídá vlastní yt-dlp archiv tohoto modulu, takže se stejná videa "
             "znovu nestahují. Pornhub část má vlastní nastavení i data a nijak se nemíchá s Instagramem ani RedGIFem."
@@ -312,6 +332,7 @@ class MainWindow(QMainWindow):
             QLabel#subtitle { font-size: 14px; color: #6b7078; margin-left: 8px; }
             QLabel#sectionTitle { font-size: 13px; font-weight: 800; color: #30343a; }
             QLabel#hint { color: #6b7078; padding: 6px 2px; }
+            QLabel#downloadInfo { color: #30343a; font-weight: 700; padding: 3px 2px; }
             QPushButton, QComboBox, QLineEdit, QTextEdit {
                 background: #ffffff; border: 1px solid #c9ccd1; border-radius: 5px;
                 padding: 6px 10px; min-height: 20px;
@@ -490,6 +511,8 @@ class MainWindow(QMainWindow):
         self.set_busy(True)
         self.progress.setValue(0)
         self.progress.show()
+        self.download_info_label.setText(f"Videa: 0/{len(urls)} • Připravuji stahování…")
+        self.download_info_label.show()
         thread.start()
 
     @Slot(str, int, int)
@@ -501,6 +524,9 @@ class MainWindow(QMainWindow):
             last_run=datetime.now().strftime("%d/%m/%Y %H:%M"),
         )
         self.statusBar().showMessage(f"Stahuji {index}/{total}…")
+        self.download_info_label.setText(
+            f"Video {index}/{total} • připravuji…"
+        )
         self.refresh_jobs()
 
     def _row_for_url(self, url: str) -> int:
@@ -510,14 +536,37 @@ class MainWindow(QMainWindow):
                 return row
         return -1
 
-    @Slot(str, int, str)
-    def _item_progress(self, url: str, percent: int, title: str):
+    @Slot(str, int, str, int, int, int, int)
+    def _item_progress(
+        self,
+        url: str,
+        percent: int,
+        title: str,
+        url_index: int,
+        url_total: int,
+        video_index: int,
+        video_total: int,
+    ):
         self.progress.setValue(percent)
+
+        clean_title = "" if title in {"Stahuji", "Dokončuji"} else title
+        if video_total > 1:
+            info = (
+                f"Odkaz {url_index}/{url_total} • "
+                f"Video {video_index}/{video_total} • {percent} %"
+            )
+        else:
+            info = f"Video {url_index}/{url_total} • {percent} %"
+
+        if clean_title:
+            info += f" • {clean_title}"
+        self.download_info_label.setText(info)
+
         row = self._row_for_url(url)
         if row < 0:
             return
-        if title and title not in {"Stahuji", "Dokončuji"}:
-            self.table.item(row, 0).setText(title)
+        if clean_title:
+            self.table.item(row, 0).setText(clean_title)
         self.table.item(row, 2).setText("Stahuji")
         self.table.item(row, 3).setText(f"{percent} %")
 
@@ -537,6 +586,10 @@ class MainWindow(QMainWindow):
     @Slot(int, int)
     def _download_finished(self, ok_count: int, error_count: int):
         self.progress.setValue(100 if error_count == 0 else self.progress.value())
+        total = ok_count + error_count
+        self.download_info_label.setText(
+            f"Hotovo: {ok_count}/{total} • Chyby: {error_count}"
+        )
         if error_count:
             QMessageBox.warning(
                 self,
