@@ -9,7 +9,6 @@ from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -64,7 +63,6 @@ class DownloadWorker(QObject):
         urls: list[str],
         destination: str,
         archive_file: str,
-        quality: str,
         cookies_file: str,
         reference_url: str,
     ):
@@ -72,7 +70,6 @@ class DownloadWorker(QObject):
         self.urls = urls
         self.destination = destination
         self.archive_file = archive_file
-        self.quality = quality
         self.cookies_file = cookies_file
         self.reference_url = reference_url
 
@@ -119,7 +116,6 @@ class DownloadWorker(QObject):
                     url,
                     self.destination,
                     self.archive_file,
-                    quality=self.quality,
                     cookies_file=self.cookies_file,
                     progress_callback=progress,
                     completed_callback=self.video_downloaded.emit,
@@ -164,59 +160,19 @@ class AddUrlsDialog(QDialog):
         return [line.strip() for line in self.edit.toPlainText().splitlines() if line.strip()]
 
 
-class SettingsDialog(QDialog):
-    def __init__(self, storage: Storage, parent=None):
+class NewerThanDialog(QDialog):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.storage = storage
-        self.setWindowTitle("Nastavení")
-        self.resize(760, 340)
+        self.setWindowTitle("Stáhnout novější videa")
+        self.resize(650, 180)
 
         layout = QVBoxLayout(self)
-        form = QFormLayout()
-
-        default_dir = str(Path.home() / "Stažené" / "Pornhub")
-        dir_row = QHBoxLayout()
-        self.directory_edit = QLineEdit(storage.get_setting("download_dir", default_dir))
-        choose_dir = QPushButton("Vybrat…")
-        choose_dir.clicked.connect(self.choose_directory)
-        dir_row.addWidget(self.directory_edit, 1)
-        dir_row.addWidget(choose_dir)
-        form.addRow("Složka pro stahování:", dir_row)
-
-        marker_default = storage.get_setting("download_dir", default_dir)
-        marker_row = QHBoxLayout()
-        self.marker_directory_edit = QLineEdit(
-            storage.get_setting("marker_dir", marker_default)
+        info = QLabel(
+            "Vlož odkaz na referenční video. Z vybraného profilu nebo seznamu "
+            "se stáhnou jen videa zveřejněná po něm."
         )
-        marker_button = QPushButton("Vybrat…")
-        marker_button.clicked.connect(self.choose_marker_directory)
-        marker_row.addWidget(self.marker_directory_edit, 1)
-        marker_row.addWidget(marker_button)
-        form.addRow("Složka databáze:", marker_row)
-
-        self.reference_edit = QLineEdit(
-            storage.get_setting("reference_url", "")
-        )
-        self.reference_edit.setPlaceholderText(
-            "volitelné: odkaz na video; stáhnou se jen novější"
-        )
-        form.addRow("Novější než video:", self.reference_edit)
-
-        reference_hint = QLabel(
-            "Používá se hlavně pro profil nebo seznam videí. "
-            "Prázdné pole = bez časového omezení."
-        )
-        reference_hint.setWordWrap(True)
-        form.addRow("", reference_hint)
-
-        self.quality = QComboBox()
-        self.quality.addItem("Nejlepší dostupná", "best")
-        self.quality.addItem("Max. 1080p", "1080")
-        self.quality.addItem("Max. 720p", "720")
-        saved_quality = storage.get_setting("quality", "best")
-        index = self.quality.findData(saved_quality)
-        self.quality.setCurrentIndex(max(0, index))
-        form.addRow("Kvalita:", self.quality)
+        info.setWordWrap(True)
+        layout.addWidget(info)
 
         cookie_row = QHBoxLayout()
         self.cookies_edit = QLineEdit(storage.get_setting("cookies_file", ""))
@@ -260,8 +216,6 @@ class SettingsDialog(QDialog):
             "marker_dir", self.marker_directory_edit.text().strip()
         )
         self.storage.set_setting("download_dir", self.directory_edit.text().strip())
-        self.storage.set_setting("reference_url", self.reference_edit.text().strip())
-        self.storage.set_setting("quality", str(self.quality.currentData()))
         self.storage.set_setting("cookies_file", self.cookies_edit.text().strip())
         self.accept()
 
@@ -318,11 +272,13 @@ class MainWindow(QMainWindow):
         self.add_button = QPushButton("+ Odkazy")
         self.download_selected_button = QPushButton("Stáhnout vybrané")
         self.download_all_button = QPushButton("Stáhnout vše")
+        self.download_newer_button = QPushButton("Stáhnout novější…")
         self.delete_button = QPushButton("Odstranit")
         for button in (
             self.add_button,
             self.download_selected_button,
             self.download_all_button,
+            self.download_newer_button,
             self.delete_button,
         ):
             buttons.addWidget(button)
@@ -332,6 +288,7 @@ class MainWindow(QMainWindow):
         self.add_button.clicked.connect(self.add_urls)
         self.download_selected_button.clicked.connect(self.download_selected)
         self.download_all_button.clicked.connect(self.download_all)
+        self.download_newer_button.clicked.connect(self.download_newer)
         self.delete_button.clicked.connect(self.delete_selected)
 
         self.count_label = QLabel("ODKAZY: 0")
@@ -529,7 +486,39 @@ class MainWindow(QMainWindow):
     def download_all(self):
         self.start_download([str(job.get("url") or "") for job in self.storage.jobs() if job.get("url")])
 
-    def start_download(self, urls: list[str]):
+    def download_newer(self):
+        urls = self.selected_urls()
+        if not urls:
+            self.statusBar().showMessage(
+                "Vyber profil nebo seznam, ze kterého chceš stáhnout novější videa.",
+                3500,
+            )
+            return
+
+        dialog = NewerThanDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        reference_url = dialog.reference_url()
+        try:
+            host = (urlparse(reference_url).hostname or "").casefold()
+        except ValueError:
+            host = ""
+        if (
+            not reference_url
+            or not (host == "pornhub.com" or host.endswith(".pornhub.com"))
+            or "view_video.php" not in reference_url
+        ):
+            QMessageBox.warning(
+                self,
+                "Referenční video",
+                "Vlož platný odkaz na konkrétní Pornhub video.",
+            )
+            return
+
+        self.start_download(urls, reference_url=reference_url)
+
+    def start_download(self, urls: list[str], reference_url: str = ""):
         if self.download_thread is not None:
             return
         if not urls:
@@ -538,16 +527,13 @@ class MainWindow(QMainWindow):
 
         default_dir = str(Path.home() / "Stažené" / "Pornhub")
         destination = self.storage.get_setting("download_dir", default_dir)
-        quality = self.storage.get_setting("quality", "best")
         cookies_file = self.storage.get_setting("cookies_file", "")
-        reference_url = self.storage.get_setting("reference_url", "")
 
         thread = QThread(self)
         worker = DownloadWorker(
             urls,
             destination,
             str(self.storage.archive_file),
-            quality,
             cookies_file,
             reference_url,
         )
@@ -690,6 +676,7 @@ class MainWindow(QMainWindow):
             self.add_button,
             self.download_selected_button,
             self.download_all_button,
+            self.download_newer_button,
             self.delete_button,
             self.settings_button,
         ):
