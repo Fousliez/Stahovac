@@ -22,6 +22,7 @@ QUALITY_FORMATS = {
 
 _PROGRESS_RE = re.compile(r"__STAHOVAC_PROGRESS__\s*([0-9]+(?:\.[0-9]+)?)%")
 _ITEM_PREFIX = "__STAHOVAC_ITEM__"
+_DONE_PREFIX = "__STAHOVAC_DONE__"
 
 
 def download_url(
@@ -31,6 +32,7 @@ def download_url(
     quality: str = "best",
     cookies_file: str = "",
     progress_callback: Callable[[int, str, str, int, int], None] | None = None,
+    completed_callback: Callable[[dict], None] | None = None,
 ) -> str:
     """Stáhne URL přes stejný CLI režim yt-dlp, který je ověřený ručně.
 
@@ -68,6 +70,11 @@ def download_url(
         f"before_dl:{_ITEM_PREFIX}%(playlist_index|1)s\t%(playlist_count|1)s\t%(title)s",
         "--progress-template",
         "download:__STAHOVAC_PROGRESS__%(progress._percent_str)s",
+        "--print",
+        (
+            f"after_move:{_DONE_PREFIX}%(id)s\t%(extractor_key)s\t"
+            "%(webpage_url)s\t%(uploader|)s\t%(title)s\t%(filepath)s"
+        ),
     ]
 
     if cookies_file.strip():
@@ -122,6 +129,24 @@ def download_url(
                     current_video_index,
                     current_video_total,
                 )
+            continue
+
+        if line.startswith(_DONE_PREFIX):
+            payload = line[len(_DONE_PREFIX):]
+            parts = payload.split("\t", 5)
+            item = {
+                "id": parts[0].strip() if len(parts) > 0 else "",
+                "extractor": parts[1].strip() if len(parts) > 1 else "",
+                "webpage_url": parts[2].strip() if len(parts) > 2 else "",
+                "uploader": parts[3].strip() if len(parts) > 3 else "",
+                "title": parts[4].strip() if len(parts) > 4 else "",
+                "filepath": parts[5].strip() if len(parts) > 5 else "",
+                "source_url": url,
+            }
+            if item["title"]:
+                final_title = item["title"]
+            if completed_callback is not None and item["id"]:
+                completed_callback(item)
             continue
 
         match = _PROGRESS_RE.search(line)
