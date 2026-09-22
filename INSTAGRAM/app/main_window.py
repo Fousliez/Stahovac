@@ -274,7 +274,8 @@ class MainWindow(QMainWindow):
 
         hint = QLabel(
             "První průchod vytvoří výchozí stav. Další průchody ukážou jen nově objevené posty. "
-            "Když později smažeš stažený soubor z disku, post zůstává v evidenci jako zpracovaný."
+            "Skutečně stažené příspěvky se navíc evidují v INSTAGRAM_MARKERY.db ve zvolené "
+            "složce pro stahování, odděleně od interní databáze profilů a stavů."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -558,6 +559,22 @@ class MainWindow(QMainWindow):
     @Slot(int, bool, str)
     def _download_post_finished(self, post_id: int, success: bool, message: str):
         self.db.set_post_status(post_id, "downloaded" if success else "error")
+
+        if success:
+            post = self.db.post(post_id)
+            profile = (
+                self.db.profile(int(post["profile_id"]))
+                if post is not None
+                else None
+            )
+            if post is not None:
+                self.db.mark_download(
+                    str(post["shortcode"]),
+                    username=str(profile["username"]) if profile is not None else "",
+                    post_url=str(post["post_url"]),
+                    destination=self.download_destination,
+                )
+
         if message:
             self._download_errors.append(message)
 
