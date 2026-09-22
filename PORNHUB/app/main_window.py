@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .downloader import download_url
+from .downloader import download_url, resolve_reference_cutoff
 from .storage import Storage
 from .version import APPLICATION_NAME, BUILD_VERSION
 
@@ -56,6 +56,7 @@ class DownloadWorker(QObject):
     item_progress = Signal(str, int, str, int, int, int, int)
     item_finished = Signal(str, bool, str, str)
     video_downloaded = Signal(dict)
+    failed = Signal(str)
     finished = Signal(int, int)
 
     def __init__(
@@ -65,6 +66,7 @@ class DownloadWorker(QObject):
         archive_file: str,
         quality: str,
         cookies_file: str,
+        reference_url: str,
     ):
         super().__init__()
         self.urls = urls
@@ -72,12 +74,22 @@ class DownloadWorker(QObject):
         self.archive_file = archive_file
         self.quality = quality
         self.cookies_file = cookies_file
+        self.reference_url = reference_url
 
     @Slot()
     def run(self):
         ok_count = 0
         error_count = 0
         total = len(self.urls)
+
+        try:
+            reference_timestamp, reference_date_after = resolve_reference_cutoff(
+                self.reference_url,
+                self.cookies_file,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
 
         for index, url in enumerate(self.urls, start=1):
             self.item_started.emit(url, index, total)
@@ -111,6 +123,8 @@ class DownloadWorker(QObject):
                     cookies_file=self.cookies_file,
                     progress_callback=progress,
                     completed_callback=self.video_downloaded.emit,
+                    reference_timestamp=reference_timestamp,
+                    reference_date_after=reference_date_after,
                 )
             except Exception as exc:
                 error_count += 1
@@ -155,7 +169,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.storage = storage
         self.setWindowTitle("Nastavení")
-        self.resize(720, 230)
+        self.resize(760, 340)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -168,6 +182,32 @@ class SettingsDialog(QDialog):
         dir_row.addWidget(self.directory_edit, 1)
         dir_row.addWidget(choose_dir)
         form.addRow("Složka pro stahování:", dir_row)
+
+        marker_default = storage.get_setting("download_dir", default_dir)
+        marker_row = QHBoxLayout()
+        self.marker_directory_edit = QLineEdit(
+            storage.get_setting("marker_dir", marker_default)
+        )
+        marker_button = QPushButton("Vybrat…")
+        marker_button.clicked.connect(self.choose_marker_directory)
+        marker_row.addWidget(self.marker_directory_edit, 1)
+        marker_row.addWidget(marker_button)
+        form.addRow("Složka databáze:", marker_row)
+
+        self.reference_edit = QLineEdit(
+            storage.get_setting("reference_url", "")
+        )
+        self.reference_edit.setPlaceholderText(
+            "volitelné: odkaz na video; stáhnou se jen novější"
+        )
+        form.addRow("Novější než video:", self.reference_edit)
+
+        reference_hint = QLabel(
+            "Používá se hlavně pro profil nebo seznam videí. "
+            "Prázdné pole = bez časového omezení."
+        )
+        reference_hint.setWordWrap(True)
+        form.addRow("", reference_hint)
 
         self.quality = QComboBox()
         self.quality.addItem("Nejlepší dostupná", "best")
@@ -199,6 +239,14 @@ class SettingsDialog(QDialog):
         if value:
             self.directory_edit.setText(value)
 
+    def choose_marker_directory(self):
+        current = self.marker_directory_edit.text().strip() or str(Path.home())
+        value = QFileDialog.getExistingDirectory(
+            self, "Vyber složku pro databázi", current
+        )
+        if value:
+            self.marker_directory_edit.setText(value)
+
     def choose_cookies(self):
         current = self.cookies_edit.text().strip() or str(Path.home())
         value, _ = QFileDialog.getOpenFileName(
@@ -208,7 +256,11 @@ class SettingsDialog(QDialog):
             self.cookies_edit.setText(value)
 
     def save(self):
+        self.storage.set_setting(
+            "marker_dir", self.marker_directory_edit.text().strip()
+        )
         self.storage.set_setting("download_dir", self.directory_edit.text().strip())
+        self.storage.set_setting("reference_url", self.reference_edit.text().strip())
         self.storage.set_setting("quality", str(self.quality.currentData()))
         self.storage.set_setting("cookies_file", self.cookies_edit.text().strip())
         self.accept()
@@ -317,7 +369,7 @@ class MainWindow(QMainWindow):
 
         hint = QLabel(
             "Každé dokončené video se ukládá do databáze PORNHUB_MARKERY.db ve zvolené "
-            "složce pro stahování. Eviduje ID, název, URL, profil/uploadera, cestu k souboru "
+            "složce databáze. Eviduje ID, název, URL, profil/uploadera, cestu k souboru "
             "a datum stažení. Databáze zároveň drží pomocný yt-dlp archiv v synchronizaci."
         )
         hint.setObjectName("hint")
@@ -488,6 +540,7 @@ class MainWindow(QMainWindow):
         destination = self.storage.get_setting("download_dir", default_dir)
         quality = self.storage.get_setting("quality", "best")
         cookies_file = self.storage.get_setting("cookies_file", "")
+        reference_url = self.storage.get_setting("reference_url", "")
 
         thread = QThread(self)
         worker = DownloadWorker(
@@ -496,6 +549,7 @@ class MainWindow(QMainWindow):
             str(self.storage.archive_file),
             quality,
             cookies_file,
+            reference_url,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -503,8 +557,10 @@ class MainWindow(QMainWindow):
         worker.item_progress.connect(self._item_progress)
         worker.item_finished.connect(self._item_finished)
         worker.video_downloaded.connect(self._video_downloaded)
+        worker.failed.connect(self._download_failed)
         worker.finished.connect(self._download_finished)
         worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._download_cleanup)
@@ -598,6 +654,11 @@ class MainWindow(QMainWindow):
             if message:
                 self.statusBar().showMessage(message, 8000)
         self.refresh_jobs()
+
+    @Slot(str)
+    def _download_failed(self, message: str):
+        self.download_info_label.setText("Stahování se nepodařilo spustit.")
+        QMessageBox.warning(self, "Stahování", message)
 
     @Slot(int, int)
     def _download_finished(self, ok_count: int, error_count: int):
