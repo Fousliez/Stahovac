@@ -14,6 +14,7 @@ class Database:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize()
+        self.remove_setting("reference_url")
         self._init_marker_database()
         self._migrate_downloaded_posts_to_markers()
 
@@ -222,6 +223,10 @@ class Database:
             self._ensure_marker_schema(new_path)
             self._insert_marker_rows(new_path, old_marker_rows)
             self._migrate_downloaded_posts_to_markers()
+
+    def remove_setting(self, key: str) -> None:
+        with self.connect() as con:
+            con.execute("DELETE FROM settings WHERE key = ?", (key,))
 
     def marker_database(self) -> Path:
         default_dir = str(Path.home() / "Stažené" / "Instagram")
