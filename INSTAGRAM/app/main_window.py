@@ -101,7 +101,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.db = database
         self.setWindowTitle("Nastavení")
-        self.resize(760, 300)
+        self.resize(760, 230)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -133,21 +133,6 @@ class SettingsDialog(QDialog):
         marker_row.addWidget(self.marker_directory_edit, 1)
         marker_row.addWidget(marker_button)
         form.addRow("Složka databáze:", marker_row)
-
-        self.reference_edit = QLineEdit(
-            self.db.get_setting("reference_url", "")
-        )
-        self.reference_edit.setPlaceholderText(
-            "volitelné: odkaz na post/reel; vezmou se jen novější"
-        )
-        form.addRow("Novější než příspěvek:", self.reference_edit)
-
-        reference_hint = QLabel(
-            "Při kontrole profilu se vezmou jen příspěvky před tímto odkazem. "
-            "Referenční příspěvek samotný se nestahuje."
-        )
-        reference_hint.setWordWrap(True)
-        form.addRow("", reference_hint)
 
         layout.addLayout(form)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -186,7 +171,6 @@ class SettingsDialog(QDialog):
             "marker_dir", self.marker_directory_edit.text().strip()
         )
         self.db.set_setting("download_dir", self.directory_edit.text().strip())
-        self.db.set_setting("reference_url", self.reference_edit.text().strip())
         self.accept()
 
 
@@ -200,6 +184,7 @@ class MainWindow(QMainWindow):
         self.download_thread: QThread | None = None
         self.download_worker: DownloadWorker | None = None
         self.scanning_profile_id: int | None = None
+        self.scan_reference_url = ""
         self.downloading_profile_id: int | None = None
         self.download_destination = ""
         self._download_errors: list[str] = []
@@ -232,12 +217,14 @@ class MainWindow(QMainWindow):
         buttons = QHBoxLayout()
         self.add_button = QPushButton("+ Profil")
         self.scan_button = QPushButton("Projít profil")
+        self.scan_newer_button = QPushButton("Projít novější…")
         self.download_button = QPushButton("Stáhnout nové")
         self.known_button = QPushButton("Nové → známé")
         self.delete_button = QPushButton("Odstranit profil")
         for button in (
             self.add_button,
             self.scan_button,
+            self.scan_newer_button,
             self.download_button,
             self.known_button,
             self.delete_button,
@@ -248,6 +235,7 @@ class MainWindow(QMainWindow):
 
         self.add_button.clicked.connect(self.add_profile)
         self.scan_button.clicked.connect(self.scan_selected_profile)
+        self.scan_newer_button.clicked.connect(self.scan_newer_profile)
         self.download_button.clicked.connect(self.download_new_posts)
         self.known_button.clicked.connect(self.mark_selected_known)
         self.delete_button.clicked.connect(self.delete_selected_profile)
@@ -472,6 +460,34 @@ class MainWindow(QMainWindow):
             button.setDisabled(busy)
 
     def scan_selected_profile(self):
+        self._start_profile_scan("")
+
+    def scan_newer_profile(self):
+        profile_id = self.selected_profile_id()
+        if profile_id is None:
+            self.statusBar().showMessage("Nejdřív vyber profil.", 2500)
+            return
+
+        reference_url, ok = QInputDialog.getText(
+            self,
+            "Projít novější příspěvky",
+            "Odkaz na referenční post nebo reel:",
+        )
+        if not ok:
+            return
+
+        reference_url = reference_url.strip()
+        if not self.reference_shortcode(reference_url):
+            QMessageBox.warning(
+                self,
+                "Referenční příspěvek",
+                "Vlož platný odkaz na Instagram post nebo reel.",
+            )
+            return
+
+        self._start_profile_scan(reference_url)
+
+    def _start_profile_scan(self, reference_url: str):
         profile_id = self.selected_profile_id()
         if profile_id is None or self.scan_thread is not None or self.download_thread is not None:
             return
@@ -479,8 +495,14 @@ class MainWindow(QMainWindow):
         if profile is None:
             return
         self.scanning_profile_id = profile_id
+        self.scan_reference_url = reference_url
         self.set_busy(True)
-        self.statusBar().showMessage(f"Procházím @{profile['username']}…")
+        if reference_url:
+            self.statusBar().showMessage(
+                f"Procházím novější příspěvky @{profile['username']}…"
+            )
+        else:
+            self.statusBar().showMessage(f"Procházím @{profile['username']}…")
 
         thread = QThread(self)
         worker = ScanWorker(profile["url"], self.db.get_setting("cookies_file"))
@@ -513,8 +535,8 @@ class MainWindow(QMainWindow):
     def filter_posts_newer_than_reference(
         self,
         posts: list[dict],
+        reference_url: str,
     ) -> tuple[list[dict], bool]:
-        reference_url = self.db.get_setting("reference_url", "")
         reference = self.reference_shortcode(reference_url)
         if not reference:
             return posts, not bool(reference_url.strip())
@@ -536,8 +558,11 @@ class MainWindow(QMainWindow):
         profile = self.db.profile(profile_id)
         first_scan = bool(profile is not None and not profile["first_scan_done"])
 
-        reference_url = self.db.get_setting("reference_url", "").strip()
-        filtered_posts, reference_found = self.filter_posts_newer_than_reference(posts)
+        reference_url = self.scan_reference_url.strip()
+        filtered_posts, reference_found = self.filter_posts_newer_than_reference(
+            posts,
+            reference_url,
+        )
         if reference_url and not reference_found:
             QMessageBox.warning(
                 self,
@@ -583,6 +608,7 @@ class MainWindow(QMainWindow):
         self.scan_thread = None
         self.scan_worker = None
         self.scanning_profile_id = None
+        self.scan_reference_url = ""
 
     def mark_selected_known(self):
         profile_id = self.selected_profile_id()
