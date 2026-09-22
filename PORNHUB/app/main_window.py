@@ -357,7 +357,7 @@ class MainWindow(QMainWindow):
 
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ["Název", "Odkaz", "Stav", "Průběh", "Poslední spuštění"]
+            ["Název", "Odkaz", "Stav", "Průběh", "Poslední kontrola"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -428,6 +428,33 @@ class MainWindow(QMainWindow):
             """
         )
 
+    @staticmethod
+    def format_last_check(value: str) -> str:
+        if not value:
+            return "Ještě nezkontrolováno"
+
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M"):
+            try:
+                stamp = datetime.strptime(value, fmt)
+                return f"{stamp.day}/{stamp.month}/{stamp.year}"
+            except ValueError:
+                pass
+
+        return value
+
+    @staticmethod
+    def last_check_sort_value(value: str) -> float:
+        if not value:
+            return 0.0
+
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M"):
+            try:
+                return datetime.strptime(value, fmt).timestamp()
+            except ValueError:
+                pass
+
+        return 0.0
+
     def refresh_jobs(self):
         jobs = self.storage.jobs()
         current = {url for url in self.selected_urls()}
@@ -452,13 +479,10 @@ class MainWindow(QMainWindow):
                 url,
                 status,
                 f"{progress} %",
-                last_run,
+                self.format_last_check(last_run),
             ]
 
-            try:
-                last_run_sort = datetime.strptime(last_run, "%d/%m/%Y %H:%M").timestamp()
-            except ValueError:
-                last_run_sort = 0
+            last_run_sort = self.last_check_sort_value(last_run)
 
             sort_values = [
                 title.casefold(),
@@ -627,7 +651,7 @@ class MainWindow(QMainWindow):
             url,
             status=f"Stahuji {index}/{total}",
             progress=0,
-            last_run=datetime.now().strftime("%d/%m/%Y %H:%M"),
+            last_run=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
         self.statusBar().showMessage(f"Stahuji {index}/{total}…")
         self.download_info_label.setText(
