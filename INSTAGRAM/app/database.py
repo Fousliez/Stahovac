@@ -37,7 +37,8 @@ class Database:
                     url TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     last_scan_at TEXT,
-                    first_scan_done INTEGER NOT NULL DEFAULT 0
+                    first_scan_done INTEGER NOT NULL DEFAULT 0,
+                    checked INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS posts (
@@ -62,6 +63,14 @@ class Database:
                     ON posts(profile_id, status);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in con.execute("PRAGMA table_info(profiles)").fetchall()
+            }
+            if "checked" not in columns:
+                con.execute(
+                    "ALTER TABLE profiles ADD COLUMN checked INTEGER NOT NULL DEFAULT 0"
+                )
 
     @staticmethod
     def now() -> str:
@@ -74,6 +83,13 @@ class Database:
                 (username.strip(), url.strip(), self.now()),
             )
             return int(cur.lastrowid)
+
+    def set_profile_checked(self, profile_id: int, checked: bool) -> None:
+        with self.connect() as con:
+            con.execute(
+                "UPDATE profiles SET checked = ? WHERE id = ?",
+                (1 if checked else 0, int(profile_id)),
+            )
 
     def delete_profile(self, profile_id: int) -> None:
         with self.connect() as con:
