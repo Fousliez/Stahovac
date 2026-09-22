@@ -55,6 +55,7 @@ class DownloadWorker(QObject):
     item_started = Signal(str, int, int)
     item_progress = Signal(str, int, str, int, int, int, int)
     item_finished = Signal(str, bool, str, str)
+    video_downloaded = Signal(dict)
     finished = Signal(int, int)
 
     def __init__(
@@ -109,6 +110,7 @@ class DownloadWorker(QObject):
                     quality=self.quality,
                     cookies_file=self.cookies_file,
                     progress_callback=progress,
+                    completed_callback=self.video_downloaded.emit,
                 )
             except Exception as exc:
                 error_count += 1
@@ -314,8 +316,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.download_info_label)
 
         hint = QLabel(
-            "Stažené položky hlídá vlastní yt-dlp archiv tohoto modulu, takže se stejná videa "
-            "znovu nestahují. Pornhub část má vlastní nastavení i data a nijak se nemíchá s Instagramem ani RedGIFem."
+            "Každé dokončené video se ukládá do databáze PORNHUB_MARKERY.db ve zvolené "
+            "složce pro stahování. Eviduje ID, název, URL, profil/uploadera, cestu k souboru "
+            "a datum stažení. Databáze zároveň drží pomocný yt-dlp archiv v synchronizaci."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -499,6 +502,7 @@ class MainWindow(QMainWindow):
         worker.item_started.connect(self._item_started)
         worker.item_progress.connect(self._item_progress)
         worker.item_finished.connect(self._item_finished)
+        worker.video_downloaded.connect(self._video_downloaded)
         worker.finished.connect(self._download_finished)
         worker.finished.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
@@ -569,6 +573,18 @@ class MainWindow(QMainWindow):
             self.table.item(row, 0).setText(clean_title)
         self.table.item(row, 2).setText("Stahuji")
         self.table.item(row, 3).setText(f"{percent} %")
+
+    @Slot(dict)
+    def _video_downloaded(self, item: dict):
+        self.storage.mark_download(
+            str(item.get("id", "")),
+            extractor=str(item.get("extractor", "")),
+            title=str(item.get("title", "")),
+            webpage_url=str(item.get("webpage_url", "")),
+            uploader=str(item.get("uploader", "")),
+            filepath=str(item.get("filepath", "")),
+            source_url=str(item.get("source_url", "")),
+        )
 
     @Slot(str, bool, str, str)
     def _item_finished(self, url: str, success: bool, message: str, title: str):
