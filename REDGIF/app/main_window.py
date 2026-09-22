@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QCloseEvent, QColor
+from PySide6.QtGui import QBrush, QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -25,6 +25,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QStatusBar,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -60,6 +63,29 @@ class SortableTableWidgetItem(QTableWidgetItem):
             except TypeError:
                 return str(self.sort_value).casefold() < str(other.sort_value).casefold()
         return super().__lt__(other)
+
+
+class ProfileRowDelegate(QStyledItemDelegate):
+    """Vykreslí stav profilu bez změny dat položek, takže nespouští třídění."""
+
+    def __init__(self, window, parent=None):
+        super().__init__(parent)
+        self.window = window
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+
+        username = str(index.data(Qt.UserRole) or "").strip()
+        if username:
+            age_state, checked = self.window.profile_visual_state(username)
+            color = self.window.profile_row_color(age_state, checked)
+            if color is not None:
+                opt.backgroundBrush = QBrush(color)
+
+        widget = opt.widget
+        style = widget.style() if widget is not None else self.window.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
 
 
 class ScanWorker(QObject):
@@ -265,6 +291,7 @@ class MainWindow(QMainWindow):
         self._scan_batch_current_position = 0
         self._scan_batch_queue: list[tuple[int, str]] = []
         self._scan_batch_results: list[dict] = []
+        self._profile_visual_states: dict[str, tuple[str, bool]] = {}
 
         self.setWindowTitle(f"{APPLICATION_NAME} {BUILD_VERSION}")
         self.resize(1120, 760)
@@ -347,6 +374,7 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
+        self.table.setItemDelegate(ProfileRowDelegate(self, self.table))
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setSortIndicatorShown(True)
@@ -532,16 +560,11 @@ class MainWindow(QMainWindow):
             return QColor("#d9dde2")
         return None
 
-    def apply_profile_row_color(self, row: int, age_state: str, checked: bool):
-        color = self.profile_row_color(age_state, checked)
-        for column in range(self.table.columnCount()):
-            item = self.table.item(row, column)
-            if item is None:
-                continue
-            if color is None:
-                item.setData(Qt.BackgroundRole, None)
-            else:
-                item.setBackground(color)
+    def profile_visual_state(self, username: str) -> tuple[str, bool]:
+        return self._profile_visual_states.get(
+            str(username or "").casefold(),
+            ("none", False),
+        )
 
     def profile_download_dir(self, username: str) -> Path:
         base = self.storage.get_setting(
@@ -586,15 +609,11 @@ class MainWindow(QMainWindow):
 
         profile = self.storage.profile(username) or {}
         age_state = self.check_age_state(str(profile.get("last_update", "")))
+        self._profile_visual_states[username.casefold()] = (age_state, checked)
 
-        needle = username.casefold()
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            value = str(item.data(Qt.UserRole) or "") if item else ""
-            if value.casefold() != needle:
-                continue
-            self.apply_profile_row_color(row, age_state, checked)
-            break
+        # Pouze repaint. Žádný setData/setBackground/setText na tabulkových
+        # položkách, takže Qt nemá co znovu třídit ani přesouvat.
+        self.table.viewport().update()
 
     def update_profile_actions(self):
         self.open_folder_button.setEnabled(bool(self.selected_username()))
@@ -701,6 +720,7 @@ class MainWindow(QMainWindow):
         self.table.blockSignals(True)
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(profiles))
+        self._profile_visual_states.clear()
 
         for row_index, profile in enumerate(profiles):
             username = str(profile.get("username", ""))
@@ -771,14 +791,13 @@ class MainWindow(QMainWindow):
             ]
 
             age_state = self.check_age_state(last_update)
+            self._profile_visual_states[username.casefold()] = (age_state, checked)
             for column, value in enumerate(values, start=1):
                 item = SortableTableWidgetItem(value, sort_values[column - 1])
                 item.setData(Qt.UserRole, username)
                 if column in {4, 5}:
                     item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_index, column, item)
-
-            self.apply_profile_row_color(row_index, age_state, checked)
 
         self.table.resizeColumnsToContents()
         self.table.setColumnWidth(0, 38)
