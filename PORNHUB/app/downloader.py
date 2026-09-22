@@ -89,7 +89,7 @@ def download_url(
         # Pornhub aktuálně vrací HTTP 410 běžným automatizovaným HTTP
         # klientům. curl_cffi dovolí yt-dlp posílat požadavky s browser
         # TLS fingerprintem; Chrome impersonace se osvědčila i v upstreamu.
-        "impersonate": "chrome",
+        "impersonate": "Chrome-145:Macos-26",
         "http_headers": {
             "Referer": "https://www.pornhub.com/",
         },
