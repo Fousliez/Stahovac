@@ -174,6 +174,55 @@ class NewerThanDialog(QDialog):
         info.setWordWrap(True)
         layout.addWidget(info)
 
+        self.reference_edit = QLineEdit()
+        self.reference_edit.setPlaceholderText(
+            "https://www.pornhub.com/view_video.php?viewkey=…"
+        )
+        layout.addWidget(self.reference_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Stáhnout novější")
+        buttons.button(QDialogButtonBox.Cancel).setText("Zrušit")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def reference_url(self) -> str:
+        return self.reference_edit.text().strip()
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, storage: Storage, parent=None):
+        super().__init__(parent)
+        self.storage = storage
+        self.setWindowTitle("Nastavení")
+        self.resize(760, 240)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        default_dir = str(Path.home() / "Stažené" / "Pornhub")
+        dir_row = QHBoxLayout()
+        self.directory_edit = QLineEdit(
+            storage.get_setting("download_dir", default_dir)
+        )
+        choose_dir = QPushButton("Vybrat…")
+        choose_dir.clicked.connect(self.choose_directory)
+        dir_row.addWidget(self.directory_edit, 1)
+        dir_row.addWidget(choose_dir)
+        form.addRow("Složka pro stahování:", dir_row)
+
+        marker_default = storage.get_setting("download_dir", default_dir)
+        marker_row = QHBoxLayout()
+        self.marker_directory_edit = QLineEdit(
+            storage.get_setting("marker_dir", marker_default)
+        )
+        marker_button = QPushButton("Vybrat…")
+        marker_button.clicked.connect(self.choose_marker_directory)
+        marker_row.addWidget(self.marker_directory_edit, 1)
+        marker_row.addWidget(marker_button)
+        form.addRow("Složka databáze:", marker_row)
+
         cookie_row = QHBoxLayout()
         self.cookies_edit = QLineEdit(storage.get_setting("cookies_file", ""))
         self.cookies_edit.setPlaceholderText("volitelné cookies.txt")
@@ -184,14 +233,18 @@ class NewerThanDialog(QDialog):
         form.addRow("Cookies soubor:", cookie_row)
 
         layout.addLayout(form)
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel
+        )
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
     def choose_directory(self):
         current = self.directory_edit.text().strip() or str(Path.home())
-        value = QFileDialog.getExistingDirectory(self, "Vyber složku pro stahování", current)
+        value = QFileDialog.getExistingDirectory(
+            self, "Vyber složku pro stahování", current
+        )
         if value:
             self.directory_edit.setText(value)
 
@@ -206,7 +259,10 @@ class NewerThanDialog(QDialog):
     def choose_cookies(self):
         current = self.cookies_edit.text().strip() or str(Path.home())
         value, _ = QFileDialog.getOpenFileName(
-            self, "Vyber cookies.txt", current, "Textové soubory (*.txt);;Všechny soubory (*)"
+            self,
+            "Vyber cookies.txt",
+            current,
+            "Textové soubory (*.txt);;Všechny soubory (*)",
         )
         if value:
             self.cookies_edit.setText(value)
@@ -215,8 +271,12 @@ class NewerThanDialog(QDialog):
         self.storage.set_setting(
             "marker_dir", self.marker_directory_edit.text().strip()
         )
-        self.storage.set_setting("download_dir", self.directory_edit.text().strip())
-        self.storage.set_setting("cookies_file", self.cookies_edit.text().strip())
+        self.storage.set_setting(
+            "download_dir", self.directory_edit.text().strip()
+        )
+        self.storage.set_setting(
+            "cookies_file", self.cookies_edit.text().strip()
+        )
         self.accept()
 
 
