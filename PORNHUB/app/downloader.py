@@ -13,13 +13,7 @@ class PornhubDownloadError(RuntimeError):
     pass
 
 
-QUALITY_FORMATS = {
-    # "best" je schválně stejný formát jako u ručně ověřeného
-    # funkčního příkazu.
-    "best": "best[protocol=https][ext=mp4]/best",
-    "1080": "best[height<=1080][protocol=https][ext=mp4]/best[height<=1080]/best",
-    "720": "best[height<=720][protocol=https][ext=mp4]/best[height<=720]/best",
-}
+BEST_FORMAT = "best[protocol=https][ext=mp4]/best"
 
 _PROGRESS_RE = re.compile(r"__STAHOVAC_PROGRESS__\s*([0-9]+(?:\.[0-9]+)?)%")
 _ITEM_PREFIX = "__STAHOVAC_ITEM__"
@@ -109,7 +103,6 @@ def download_url(
     url: str,
     destination: str,
     archive_file: str,
-    quality: str = "best",
     cookies_file: str = "",
     progress_callback: Callable[[int, str, str, int, int], None] | None = None,
     completed_callback: Callable[[dict], None] | None = None,
@@ -137,7 +130,7 @@ def download_url(
         "--impersonate",
         "Chrome-145:Macos-26",
         "-f",
-        QUALITY_FORMATS.get(quality, QUALITY_FORMATS["best"]),
+        BEST_FORMAT,
         "--download-archive",
         str(archive),
         "-P",
