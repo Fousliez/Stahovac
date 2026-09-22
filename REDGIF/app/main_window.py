@@ -337,9 +337,9 @@ class MainWindow(QMainWindow):
         self.profile_count_label.setObjectName("sectionTitle")
         layout.addWidget(self.profile_count_label)
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["Jméno", "Profil", "Poslední kontrola", "Nové", "Staženo", "Stav"]
+            ["✓", "Jméno", "Profil", "Poslední kontrola", "Nové", "Staženo", "Stav"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -351,6 +351,7 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.itemSelectionChanged.connect(self.refresh_items)
         self.table.itemSelectionChanged.connect(self.update_profile_actions)
+        self.table.itemChanged.connect(self.profile_check_changed)
         self.table.cellDoubleClicked.connect(self.edit_profile_name)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_profile_context_menu)
@@ -527,7 +528,9 @@ class MainWindow(QMainWindow):
         )
         return Path(base).expanduser() / username
 
-    def edit_profile_name(self, row: int, _column: int):
+    def edit_profile_name(self, row: int, column: int):
+        if column == 0:
+            return
         item = self.table.item(row, 0)
         username = str(item.data(Qt.UserRole) or "") if item else ""
         if not username:
@@ -549,6 +552,17 @@ class MainWindow(QMainWindow):
         self.storage.set_profile_name(username, name)
         self.refresh_profiles()
         self.select_profile(username)
+
+    def profile_check_changed(self, item):
+        if item.column() != 0:
+            return
+        username = str(item.data(Qt.UserRole) or "").strip()
+        if not username:
+            return
+        self.storage.set_profile_checked(
+            username,
+            item.checkState() == Qt.Checked,
+        )
 
     def update_profile_actions(self):
         self.open_folder_button.setEnabled(bool(self.selected_username()))
@@ -672,6 +686,17 @@ class MainWindow(QMainWindow):
             else:
                 state = "V pořádku"
 
+            checked = bool(profile.get("checked", False))
+            check_item = SortableTableWidgetItem("", 1 if checked else 0)
+            check_item.setData(Qt.UserRole, username)
+            check_item.setFlags(
+                (check_item.flags() | Qt.ItemIsUserCheckable)
+                & ~Qt.ItemIsEditable
+            )
+            check_item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            check_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row_index, 0, check_item)
+
             values = [
                 custom_name,
                 username,
@@ -690,14 +715,14 @@ class MainWindow(QMainWindow):
             ]
 
             age_state = self.check_age_state(last_update)
-            for column, value in enumerate(values):
-                item = SortableTableWidgetItem(value, sort_values[column])
+            for column, value in enumerate(values, start=1):
+                item = SortableTableWidgetItem(value, sort_values[column - 1])
                 item.setData(Qt.UserRole, username)
                 if age_state == "recent":
                     item.setBackground(QColor("#e6f4ea"))
                 elif age_state == "old":
                     item.setBackground(QColor("#fce8e6"))
-                if column in {3, 4}:
+                if column in {4, 5}:
                     item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_index, column, item)
 
