@@ -521,6 +521,27 @@ class MainWindow(QMainWindow):
             return "old"
         return "none"
 
+    @staticmethod
+    def profile_row_color(age_state: str, checked: bool):
+        if age_state == "recent":
+            return QColor("#c9e5d0" if checked else "#e6f4ea")
+        if age_state == "old":
+            return QColor("#f2cbc6" if checked else "#fce8e6")
+        if checked:
+            return QColor("#d9dde2")
+        return None
+
+    def apply_profile_row_color(self, row: int, age_state: str, checked: bool):
+        color = self.profile_row_color(age_state, checked)
+        for column in range(self.table.columnCount()):
+            item = self.table.item(row, column)
+            if item is None:
+                continue
+            if color is None:
+                item.setData(Qt.BackgroundRole, None)
+            else:
+                item.setBackground(color)
+
     def profile_download_dir(self, username: str) -> Path:
         base = self.storage.get_setting(
             "download_dir",
@@ -559,10 +580,20 @@ class MainWindow(QMainWindow):
         username = str(item.data(Qt.UserRole) or "").strip()
         if not username:
             return
-        self.storage.set_profile_checked(
-            username,
-            item.checkState() == Qt.Checked,
-        )
+
+        checked = item.checkState() == Qt.Checked
+        item.sort_value = 1 if checked else 0
+        self.storage.set_profile_checked(username, checked)
+
+        profile = self.storage.profile(username) or {}
+        age_state = self.check_age_state(str(profile.get("last_update", "")))
+        row = item.row()
+
+        self.table.blockSignals(True)
+        try:
+            self.apply_profile_row_color(row, age_state, checked)
+        finally:
+            self.table.blockSignals(False)
 
     def update_profile_actions(self):
         self.open_folder_button.setEnabled(bool(self.selected_username()))
@@ -718,13 +749,11 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values, start=1):
                 item = SortableTableWidgetItem(value, sort_values[column - 1])
                 item.setData(Qt.UserRole, username)
-                if age_state == "recent":
-                    item.setBackground(QColor("#e6f4ea"))
-                elif age_state == "old":
-                    item.setBackground(QColor("#fce8e6"))
                 if column in {4, 5}:
                     item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_index, column, item)
+
+            self.apply_profile_row_color(row_index, age_state, checked)
 
         self.table.resizeColumnsToContents()
         self.table.setSortingEnabled(sorting_enabled)
