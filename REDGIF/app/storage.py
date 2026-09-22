@@ -65,17 +65,23 @@ class Storage:
 
         changed = False
         for profile in profiles:
-            if not isinstance(profile, dict) or "last_update" in profile:
+            if not isinstance(profile, dict):
                 continue
 
-            last_scan = str(profile.get("last_scan", ""))
-            try:
-                new_count = int(profile.get("new", 0))
-            except (TypeError, ValueError):
-                new_count = 0
+            if "last_update" not in profile:
+                last_scan = str(profile.get("last_scan", ""))
+                try:
+                    new_count = int(profile.get("new", 0))
+                except (TypeError, ValueError):
+                    new_count = 0
+                profile["last_update"] = (
+                    last_scan if last_scan and new_count == 0 else ""
+                )
+                changed = True
 
-            profile["last_update"] = last_scan if last_scan and new_count == 0 else ""
-            changed = True
+            if "checked" not in profile:
+                profile["checked"] = False
+                changed = True
 
         if changed:
             self._save_profiles(profiles)
@@ -101,6 +107,7 @@ class Storage:
                 "last_update": "",
                 "total": 0,
                 "new": 0,
+                "checked": False,
             }
         )
         profiles.sort(key=lambda p: str(p.get("username", "")).casefold())
@@ -112,6 +119,15 @@ class Storage:
         for profile in profiles:
             if str(profile.get("username", "")).casefold() == needle:
                 profile["name"] = name.strip()
+                break
+        self._save_profiles(profiles)
+
+    def set_profile_checked(self, username: str, checked: bool) -> None:
+        profiles = self.profiles()
+        needle = username.casefold()
+        for profile in profiles:
+            if str(profile.get("username", "")).casefold() == needle:
+                profile["checked"] = bool(checked)
                 break
         self._save_profiles(profiles)
 
