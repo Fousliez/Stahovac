@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 from collections import deque
+from datetime import datetime, timedelta
 from collections.abc import Callable
 from pathlib import Path
 
@@ -25,6 +26,85 @@ _ITEM_PREFIX = "__STAHOVAC_ITEM__"
 _DONE_PREFIX = "__STAHOVAC_DONE__"
 
 
+def resolve_reference_cutoff(
+    reference_url: str,
+    cookies_file: str = "",
+) -> tuple[int, str]:
+    """Vrátí přesný timestamp a záložní datum pro referenční video."""
+    reference = str(reference_url or "").strip()
+    if not reference:
+        return 0, ""
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--no-config",
+        "--skip-download",
+        "--no-playlist",
+        "--impersonate",
+        "Chrome-145:Macos-26",
+        "--add-header",
+        "Referer:https://www.pornhub.com/",
+        "--print",
+        "%(timestamp|0)s\t%(upload_date|)s",
+    ]
+    if cookies_file.strip():
+        cmd.extend(["--cookies", str(Path(cookies_file).expanduser())])
+    cmd.append(reference)
+
+    try:
+        process = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=180,
+            errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PornhubDownloadError(
+            f"Referenční video se nepodařilo načíst: {exc}"
+        ) from exc
+
+    if process.returncode != 0:
+        message = (
+            process.stderr.strip()
+            or process.stdout.strip()
+            or "Referenční video se nepodařilo načíst."
+        )
+        raise PornhubDownloadError(message)
+
+    line = next(
+        (value.strip() for value in process.stdout.splitlines() if value.strip()),
+        "",
+    )
+    parts = line.split("\t", 1)
+
+    try:
+        timestamp = int(float(parts[0])) if parts and parts[0] else 0
+    except ValueError:
+        timestamp = 0
+
+    upload_date = parts[1].strip() if len(parts) > 1 else ""
+    if upload_date and not re.fullmatch(r"\d{8}", upload_date):
+        upload_date = ""
+
+    if not timestamp and not upload_date:
+        raise PornhubDownloadError(
+            "U referenčního videa se nepodařilo zjistit datum ani čas zveřejnění."
+        )
+
+    if not timestamp and upload_date:
+        # --dateafter je inkluzivní. Posun o jeden den tedy znamená
+        # skutečně až videa z následujících dnů.
+        day = datetime.strptime(upload_date, "%Y%m%d") + timedelta(days=1)
+        upload_date = day.strftime("%Y%m%d")
+
+    return timestamp, upload_date
+
+
+
 def download_url(
     url: str,
     destination: str,
@@ -33,6 +113,8 @@ def download_url(
     cookies_file: str = "",
     progress_callback: Callable[[int, str, str, int, int], None] | None = None,
     completed_callback: Callable[[dict], None] | None = None,
+    reference_timestamp: int = 0,
+    reference_date_after: str = "",
 ) -> str:
     """Stáhne URL přes stejný CLI režim yt-dlp, který je ověřený ručně.
 
@@ -79,6 +161,11 @@ def download_url(
 
     if cookies_file.strip():
         cmd.extend(["--cookies", str(Path(cookies_file).expanduser())])
+
+    if reference_timestamp > 0:
+        cmd.extend(["--match-filter", f"timestamp>{int(reference_timestamp)}"])
+    elif reference_date_after:
+        cmd.extend(["--dateafter", reference_date_after])
 
     cmd.append(url)
 
