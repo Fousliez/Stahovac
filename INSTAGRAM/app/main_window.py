@@ -452,6 +452,7 @@ class MainWindow(QMainWindow):
         for button in (
             self.add_button,
             self.scan_button,
+            self.scan_newer_button,
             self.download_button,
             self.known_button,
             self.delete_button,
