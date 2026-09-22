@@ -15,6 +15,8 @@ class Storage:
         self.archive_file = self.data_dir / "download_archive.txt"
 
         self._marker_lock = threading.RLock()
+        self.remove_setting("quality")
+        self.remove_setting("reference_url")
         self._init_marker_database()
         self._import_archive_file()
         self.sync_archive_from_database()
@@ -93,6 +95,13 @@ class Storage:
             new_db = self.marker_database()
             self._ensure_marker_schema(new_db)
             self._insert_download_rows(new_db, old_rows)
+
+    def remove_setting(self, key: str) -> None:
+        data = self._read_json(self.settings_file, {})
+        if not isinstance(data, dict) or key not in data:
+            return
+        data.pop(key, None)
+        self._write_json(self.settings_file, data)
 
     def marker_database(self) -> Path:
         default_download_dir = str(Path.home() / "Stažené" / "Pornhub")
