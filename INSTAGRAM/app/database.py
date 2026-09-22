@@ -14,6 +14,8 @@ class Database:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize()
+        self._init_marker_database()
+        self._migrate_downloaded_posts_to_markers()
 
     @contextmanager
     def connect(self):
@@ -191,6 +193,12 @@ class Database:
             return str(row["value"]) if row else default
 
     def set_setting(self, key: str, value: str) -> None:
+        old_marker_rows = (
+            self._read_marker_rows(self.marker_database())
+            if key == "download_dir"
+            else []
+        )
+
         with self.connect() as con:
             con.execute(
                 """
@@ -199,3 +207,167 @@ class Database:
                 """,
                 (key, value),
             )
+
+        if key == "download_dir":
+            new_path = self.marker_database()
+            self._ensure_marker_schema(new_path)
+            self._insert_marker_rows(new_path, old_marker_rows)
+            self._migrate_downloaded_posts_to_markers()
+
+    def marker_database(self) -> Path:
+        default_dir = str(Path.home() / "Stažené" / "Instagram")
+        download_dir = Path(
+            self.get_setting("download_dir", default_dir)
+        ).expanduser()
+        return download_dir / "INSTAGRAM_MARKERY.db"
+
+    def mark_download(
+        self,
+        shortcode: str,
+        *,
+        username: str = "",
+        post_url: str = "",
+        destination: str = "",
+    ) -> None:
+        marker_id = str(shortcode).strip()
+        if not marker_id:
+            return
+
+        path = self.marker_database()
+        self._ensure_marker_schema(path)
+        with sqlite3.connect(path, timeout=30) as connection:
+            connection.execute(
+                """
+                INSERT INTO downloads(shortcode, username, post_url, destination)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(shortcode) DO UPDATE SET
+                    username = CASE
+                        WHEN excluded.username <> '' THEN excluded.username
+                        ELSE downloads.username
+                    END,
+                    post_url = CASE
+                        WHEN excluded.post_url <> '' THEN excluded.post_url
+                        ELSE downloads.post_url
+                    END,
+                    destination = CASE
+                        WHEN excluded.destination <> '' THEN excluded.destination
+                        ELSE downloads.destination
+                    END
+                """,
+                (
+                    marker_id,
+                    str(username).strip(),
+                    str(post_url).strip(),
+                    str(destination).strip(),
+                ),
+            )
+            connection.commit()
+
+    def is_downloaded_marker(self, shortcode: str) -> bool:
+        marker_id = str(shortcode).strip()
+        if not marker_id:
+            return False
+        path = self.marker_database()
+        self._ensure_marker_schema(path)
+        with sqlite3.connect(path, timeout=30) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM downloads WHERE shortcode = ? LIMIT 1",
+                (marker_id,),
+            ).fetchone()
+        return row is not None
+
+    def marker_count(self) -> int:
+        path = self.marker_database()
+        self._ensure_marker_schema(path)
+        with sqlite3.connect(path, timeout=30) as connection:
+            row = connection.execute("SELECT COUNT(*) FROM downloads").fetchone()
+        return int(row[0] if row else 0)
+
+    def _init_marker_database(self) -> None:
+        self._ensure_marker_schema(self.marker_database())
+
+    @staticmethod
+    def _ensure_marker_schema(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path, timeout=30) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS downloads (
+                    shortcode TEXT PRIMARY KEY,
+                    username TEXT,
+                    post_url TEXT,
+                    destination TEXT,
+                    downloaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_instagram_downloads_username
+                    ON downloads(username);
+                CREATE INDEX IF NOT EXISTS idx_instagram_downloads_downloaded_at
+                    ON downloads(downloaded_at);
+                """
+            )
+            connection.commit()
+
+    def _migrate_downloaded_posts_to_markers(self) -> None:
+        path = self.marker_database()
+        self._ensure_marker_schema(path)
+
+        with self.connect() as con:
+            rows = con.execute(
+                """
+                SELECT po.shortcode, p.username, po.post_url
+                FROM posts po
+                JOIN profiles p ON p.id = po.profile_id
+                WHERE po.status = 'downloaded'
+                """
+            ).fetchall()
+
+        if not rows:
+            return
+
+        with sqlite3.connect(path, timeout=30) as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO downloads(shortcode, username, post_url)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (
+                        str(row["shortcode"]),
+                        str(row["username"]),
+                        str(row["post_url"]),
+                    )
+                    for row in rows
+                ],
+            )
+            connection.commit()
+
+    @staticmethod
+    def _read_marker_rows(path: Path) -> list[tuple]:
+        if not path.exists():
+            return []
+        try:
+            with sqlite3.connect(path, timeout=30) as connection:
+                return connection.execute(
+                    """
+                    SELECT shortcode, username, post_url, destination, downloaded_at
+                    FROM downloads
+                    """
+                ).fetchall()
+        except sqlite3.Error:
+            return []
+
+    def _insert_marker_rows(self, path: Path, rows: list[tuple]) -> None:
+        if not rows:
+            return
+        self._ensure_marker_schema(path)
+        with sqlite3.connect(path, timeout=30) as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO downloads(
+                    shortcode, username, post_url, destination, downloaded_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            connection.commit()
