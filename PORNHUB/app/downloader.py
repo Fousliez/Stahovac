@@ -21,7 +21,7 @@ QUALITY_FORMATS = {
 }
 
 _PROGRESS_RE = re.compile(r"__STAHOVAC_PROGRESS__\s*([0-9]+(?:\.[0-9]+)?)%")
-_TITLE_PREFIX = "__STAHOVAC_TITLE__"
+_ITEM_PREFIX = "__STAHOVAC_ITEM__"
 
 
 def download_url(
@@ -30,7 +30,7 @@ def download_url(
     archive_file: str,
     quality: str = "best",
     cookies_file: str = "",
-    progress_callback: Callable[[int, str, str], None] | None = None,
+    progress_callback: Callable[[int, str, str, int, int], None] | None = None,
 ) -> str:
     """Stáhne URL přes stejný CLI režim yt-dlp, který je ověřený ručně.
 
@@ -65,7 +65,7 @@ def download_url(
         "--add-header",
         "Referer:https://www.pornhub.com/",
         "--print",
-        f"before_dl:{_TITLE_PREFIX}%(title)s",
+        f"before_dl:{_ITEM_PREFIX}%(playlist_index|1)s\t%(playlist_count|1)s\t%(title)s",
         "--progress-template",
         "download:__STAHOVAC_PROGRESS__%(progress._percent_str)s",
     ]
@@ -89,6 +89,8 @@ def download_url(
 
     recent_output: deque[str] = deque(maxlen=120)
     final_title = ""
+    current_video_index = 1
+    current_video_total = 1
     assert process.stdout is not None
 
     for raw_line in process.stdout:
@@ -98,12 +100,28 @@ def download_url(
 
         recent_output.append(line)
 
-        if line.startswith(_TITLE_PREFIX):
-            title = line[len(_TITLE_PREFIX):].strip()
+        if line.startswith(_ITEM_PREFIX):
+            payload = line[len(_ITEM_PREFIX):]
+            parts = payload.split("\t", 2)
+            try:
+                current_video_index = max(1, int(parts[0]))
+            except (ValueError, IndexError):
+                current_video_index = 1
+            try:
+                current_video_total = max(1, int(parts[1]))
+            except (ValueError, IndexError):
+                current_video_total = 1
+            title = parts[2].strip() if len(parts) > 2 else ""
             if title:
                 final_title = title
-                if progress_callback is not None:
-                    progress_callback(0, "downloading", final_title)
+            if progress_callback is not None:
+                progress_callback(
+                    0,
+                    "downloading",
+                    final_title,
+                    current_video_index,
+                    current_video_total,
+                )
             continue
 
         match = _PROGRESS_RE.search(line)
@@ -113,7 +131,13 @@ def download_url(
             except ValueError:
                 percent = 0
             if progress_callback is not None:
-                progress_callback(percent, "downloading", final_title)
+                progress_callback(
+                    percent,
+                    "downloading",
+                    final_title,
+                    current_video_index,
+                    current_video_total,
+                )
 
     returncode = process.wait()
     if returncode != 0:
@@ -121,6 +145,12 @@ def download_url(
         raise PornhubDownloadError(message)
 
     if progress_callback is not None:
-        progress_callback(100, "finished", final_title)
+        progress_callback(
+            100,
+            "finished",
+            final_title,
+            current_video_index,
+            current_video_total,
+        )
 
     return final_title
