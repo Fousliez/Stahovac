@@ -556,7 +556,12 @@ class MainWindow(QMainWindow):
         self.refresh_profiles()
         self.select_profile(profile_id)
         self.refresh_posts()
-        if first_scan:
+        if first_scan and reference_url:
+            self.statusBar().showMessage(
+                f"Podle referenčního odkazu nalezeno {total} novějších příspěvků.",
+                5000,
+            )
+        elif first_scan:
             self.statusBar().showMessage(
                 f"První průchod: uloženo {total} existujících postů jako známé.",
                 5000,
