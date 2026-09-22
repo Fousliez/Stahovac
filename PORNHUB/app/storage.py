@@ -81,7 +81,7 @@ class Storage:
         return str(data.get(key, default))
 
     def set_setting(self, key: str, value: str) -> None:
-        old_rows = self._read_database_rows(self.marker_database()) if key == "download_dir" else []
+        old_rows = self._read_database_rows(self.marker_database()) if key == "marker_dir" else []
 
         data = self._read_json(self.settings_file, {})
         if not isinstance(data, dict):
@@ -89,15 +89,18 @@ class Storage:
         data[key] = value
         self._write_json(self.settings_file, data)
 
-        if key == "download_dir":
+        if key == "marker_dir":
             new_db = self.marker_database()
             self._ensure_marker_schema(new_db)
             self._insert_download_rows(new_db, old_rows)
 
     def marker_database(self) -> Path:
-        default_dir = str(Path.home() / "Stažené" / "Pornhub")
-        download_dir = Path(self.get_setting("download_dir", default_dir)).expanduser()
-        return download_dir / "PORNHUB_MARKERY.db"
+        default_download_dir = str(Path.home() / "Stažené" / "Pornhub")
+        download_dir = self.get_setting("download_dir", default_download_dir)
+        marker_dir = Path(
+            self.get_setting("marker_dir", download_dir)
+        ).expanduser()
+        return marker_dir / "PORNHUB_MARKERY.db"
 
     def mark_download(
         self,
