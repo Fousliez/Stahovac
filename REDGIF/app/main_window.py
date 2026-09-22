@@ -349,6 +349,7 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setSortIndicatorShown(True)
+        self.table.horizontalHeader().setSortIndicator(1, Qt.AscendingOrder)
         self.table.itemSelectionChanged.connect(self.refresh_items)
         self.table.itemSelectionChanged.connect(self.update_profile_actions)
         self.table.itemChanged.connect(self.profile_check_changed)
@@ -582,7 +583,6 @@ class MainWindow(QMainWindow):
             return
 
         checked = item.checkState() == Qt.Checked
-        item.sort_value = 1 if checked else 0
         self.storage.set_profile_checked(username, checked)
 
         profile = self.storage.profile(username) or {}
@@ -718,11 +718,12 @@ class MainWindow(QMainWindow):
                 state = "V pořádku"
 
             checked = bool(profile.get("checked", False))
-            check_item = SortableTableWidgetItem("", 1 if checked else 0)
+            check_item = SortableTableWidgetItem("", username.casefold())
             check_item.setData(Qt.UserRole, username)
             check_item.setFlags(
-                (check_item.flags() | Qt.ItemIsUserCheckable)
+                (check_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
                 & ~Qt.ItemIsEditable
+                & ~Qt.ItemIsSelectable
             )
             check_item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
             check_item.setTextAlignment(Qt.AlignCenter)
@@ -756,6 +757,7 @@ class MainWindow(QMainWindow):
             self.apply_profile_row_color(row_index, age_state, checked)
 
         self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(0, 38)
         self.table.setSortingEnabled(sorting_enabled)
         if sorting_enabled and sort_column >= 0:
             self.table.sortItems(sort_column, sort_order)
