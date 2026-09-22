@@ -214,9 +214,9 @@ class MainWindow(QMainWindow):
         self.known_button.clicked.connect(self.mark_selected_known)
         self.delete_button.clicked.connect(self.delete_selected_profile)
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ["Profil", "Poslední kontrola", "Nové", "Celkem", "Stav"]
+            ["✓", "Profil", "Poslední kontrola", "Nové", "Celkem", "Stav"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -224,11 +224,13 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 270)
-        self.table.setColumnWidth(1, 185)
-        self.table.setColumnWidth(2, 80)
+        self.table.setColumnWidth(0, 42)
+        self.table.setColumnWidth(1, 270)
+        self.table.setColumnWidth(2, 185)
         self.table.setColumnWidth(3, 80)
+        self.table.setColumnWidth(4, 80)
         self.table.itemSelectionChanged.connect(self.refresh_posts)
+        self.table.itemChanged.connect(self.profile_check_changed)
         layout.addWidget(self.table, 2)
 
         posts_top = QHBoxLayout()
@@ -338,9 +340,23 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(len(rows))
         select_row = -1
         for row_index, profile in enumerate(rows):
+            profile_id = int(profile["id"])
             new_count = int(profile["new_posts"] or 0)
             total_count = int(profile["total_posts"] or 0)
             state = "Nové příspěvky" if new_count else "V pořádku"
+
+            check_item = QTableWidgetItem("")
+            check_item.setData(Qt.UserRole, profile_id)
+            check_item.setFlags(
+                (check_item.flags() | Qt.ItemIsUserCheckable)
+                & ~Qt.ItemIsEditable
+            )
+            check_item.setCheckState(
+                Qt.Checked if bool(profile["checked"]) else Qt.Unchecked
+            )
+            check_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row_index, 0, check_item)
+
             values = [
                 profile["username"],
                 profile["last_scan_at"] or "Ještě nezkontrolováno",
@@ -348,10 +364,10 @@ class MainWindow(QMainWindow):
                 str(total_count),
                 state,
             ]
-            for column, value in enumerate(values):
+            for column, value in enumerate(values, start=1):
                 item = QTableWidgetItem(str(value))
-                item.setData(Qt.UserRole, int(profile["id"]))
-                if column in {2, 3}:
+                item.setData(Qt.UserRole, profile_id)
+                if column in {3, 4}:
                     item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_index, column, item)
             if selected_id == int(profile["id"]):
@@ -363,6 +379,17 @@ class MainWindow(QMainWindow):
             self.table.selectRow(0)
         else:
             self.refresh_posts()
+
+    def profile_check_changed(self, item):
+        if item.column() != 0:
+            return
+        profile_id = item.data(Qt.UserRole)
+        if profile_id is None:
+            return
+        self.db.set_profile_checked(
+            int(profile_id),
+            item.checkState() == Qt.Checked,
+        )
 
     def refresh_posts(self):
         profile_id = self.selected_profile_id()
