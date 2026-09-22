@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -352,7 +353,6 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSortIndicator(1, Qt.AscendingOrder)
         self.table.itemSelectionChanged.connect(self.refresh_items)
         self.table.itemSelectionChanged.connect(self.update_profile_actions)
-        self.table.itemChanged.connect(self.profile_check_changed)
         self.table.cellDoubleClicked.connect(self.edit_profile_name)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_profile_context_menu)
@@ -575,25 +575,26 @@ class MainWindow(QMainWindow):
         self.refresh_profiles()
         self.select_profile(username)
 
-    def profile_check_changed(self, item):
-        if item.column() != 0:
-            return
-        username = str(item.data(Qt.UserRole) or "").strip()
+    def profile_checkbox_toggled(self, username: str, checked: bool):
+        username = str(username or "").strip()
         if not username:
             return
 
-        checked = item.checkState() == Qt.Checked
+        # Stav checkboxu není součástí žádné řadicí hodnoty. Pouze uložíme
+        # značku a přebarvíme aktuální řádek, bez refresh/sort/reload tabulky.
         self.storage.set_profile_checked(username, checked)
 
         profile = self.storage.profile(username) or {}
         age_state = self.check_age_state(str(profile.get("last_update", "")))
-        row = item.row()
 
-        self.table.blockSignals(True)
-        try:
+        needle = username.casefold()
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            value = str(item.data(Qt.UserRole) or "") if item else ""
+            if value.casefold() != needle:
+                continue
             self.apply_profile_row_color(row, age_state, checked)
-        finally:
-            self.table.blockSignals(False)
+            break
 
     def update_profile_actions(self):
         self.open_folder_button.setEnabled(bool(self.selected_username()))
@@ -718,16 +719,39 @@ class MainWindow(QMainWindow):
                 state = "V pořádku"
 
             checked = bool(profile.get("checked", False))
+
+            # První sloupec má stabilní řadicí hodnotu podle username.
+            # Samotný checkbox je cellWidget, takže jeho přepnutí nikdy
+            # nevstupuje do třídění tabulky a nemůže změnit pořadí řádků.
             check_item = SortableTableWidgetItem("", username.casefold())
             check_item.setData(Qt.UserRole, username)
             check_item.setFlags(
-                (check_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                (check_item.flags() | Qt.ItemIsEnabled)
                 & ~Qt.ItemIsEditable
                 & ~Qt.ItemIsSelectable
             )
-            check_item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-            check_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row_index, 0, check_item)
+
+            check_holder = QWidget(self.table)
+            check_holder.setStyleSheet("background: transparent;")
+            check_layout = QHBoxLayout(check_holder)
+            check_layout.setContentsMargins(0, 0, 0, 0)
+            check_layout.setSpacing(0)
+
+            checkbox = QCheckBox(check_holder)
+            checkbox.setChecked(checked)
+            checkbox.setCursor(Qt.PointingHandCursor)
+            checkbox.setStyleSheet("QCheckBox { background: transparent; }")
+            checkbox.toggled.connect(
+                lambda state, name=username: self.profile_checkbox_toggled(
+                    name,
+                    bool(state),
+                )
+            )
+            check_layout.addStretch(1)
+            check_layout.addWidget(checkbox)
+            check_layout.addStretch(1)
+            self.table.setCellWidget(row_index, 0, check_holder)
 
             values = [
                 custom_name,
