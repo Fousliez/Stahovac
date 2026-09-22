@@ -101,7 +101,12 @@ class Database:
                 "SELECT * FROM profiles WHERE id = ?", (profile_id,)
             ).fetchone()
 
-    def register_scan(self, profile_id: int, posts: list[dict]) -> tuple[int, int]:
+    def register_scan(
+        self,
+        profile_id: int,
+        posts: list[dict],
+        first_scan_as_new: bool = False,
+    ) -> tuple[int, int]:
         """Zapíše výsledek průchodu.
 
         Při úplně prvním průchodu se aktuální obsah uloží jako `known`, aby
@@ -117,7 +122,11 @@ class Database:
                 return 0, 0
 
             first_scan = not bool(profile["first_scan_done"])
-            initial_status = "known" if first_scan else "new"
+            initial_status = (
+                "new"
+                if first_scan_as_new
+                else ("known" if first_scan else "new")
+            )
             now = self.now()
 
             for post in posts:
@@ -195,7 +204,7 @@ class Database:
     def set_setting(self, key: str, value: str) -> None:
         old_marker_rows = (
             self._read_marker_rows(self.marker_database())
-            if key == "download_dir"
+            if key == "marker_dir"
             else []
         )
 
@@ -208,7 +217,7 @@ class Database:
                 (key, value),
             )
 
-        if key == "download_dir":
+        if key == "marker_dir":
             new_path = self.marker_database()
             self._ensure_marker_schema(new_path)
             self._insert_marker_rows(new_path, old_marker_rows)
@@ -216,10 +225,11 @@ class Database:
 
     def marker_database(self) -> Path:
         default_dir = str(Path.home() / "Stažené" / "Instagram")
-        download_dir = Path(
-            self.get_setting("download_dir", default_dir)
+        download_dir = self.get_setting("download_dir", default_dir)
+        marker_dir = Path(
+            self.get_setting("marker_dir", download_dir)
         ).expanduser()
-        return download_dir / "INSTAGRAM_MARKERY.db"
+        return marker_dir / "INSTAGRAM_MARKERY.db"
 
     def mark_download(
         self,
