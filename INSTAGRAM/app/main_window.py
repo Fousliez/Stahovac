@@ -101,7 +101,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.db = database
         self.setWindowTitle("Nastavení")
-        self.resize(680, 160)
+        self.resize(760, 300)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -122,6 +122,32 @@ class SettingsDialog(QDialog):
         dir_row.addWidget(self.directory_edit, 1)
         dir_row.addWidget(dir_button)
         form.addRow("Složka pro stahování:", dir_row)
+
+        marker_default = self.db.get_setting("download_dir", default_dir)
+        marker_row = QHBoxLayout()
+        self.marker_directory_edit = QLineEdit(
+            self.db.get_setting("marker_dir", marker_default)
+        )
+        marker_button = QPushButton("Vybrat…")
+        marker_button.clicked.connect(self.choose_marker_directory)
+        marker_row.addWidget(self.marker_directory_edit, 1)
+        marker_row.addWidget(marker_button)
+        form.addRow("Složka databáze:", marker_row)
+
+        self.reference_edit = QLineEdit(
+            self.db.get_setting("reference_url", "")
+        )
+        self.reference_edit.setPlaceholderText(
+            "volitelné: odkaz na post/reel; vezmou se jen novější"
+        )
+        form.addRow("Novější než příspěvek:", self.reference_edit)
+
+        reference_hint = QLabel(
+            "Při kontrole profilu se vezmou jen příspěvky před tímto odkazem. "
+            "Referenční příspěvek samotný se nestahuje."
+        )
+        reference_hint.setWordWrap(True)
+        form.addRow("", reference_hint)
 
         layout.addLayout(form)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -146,9 +172,21 @@ class SettingsDialog(QDialog):
         if path:
             self.directory_edit.setText(path)
 
+    def choose_marker_directory(self):
+        current = self.marker_directory_edit.text().strip() or str(Path.home())
+        path = QFileDialog.getExistingDirectory(
+            self, "Vyber složku pro databázi", current
+        )
+        if path:
+            self.marker_directory_edit.setText(path)
+
     def save(self):
         self.db.set_setting("cookies_file", self.cookies_edit.text().strip())
+        self.db.set_setting(
+            "marker_dir", self.marker_directory_edit.text().strip()
+        )
         self.db.set_setting("download_dir", self.directory_edit.text().strip())
+        self.db.set_setting("reference_url", self.reference_edit.text().strip())
         self.accept()
 
 
@@ -275,7 +313,7 @@ class MainWindow(QMainWindow):
         hint = QLabel(
             "První průchod vytvoří výchozí stav. Další průchody ukážou jen nově objevené posty. "
             "Skutečně stažené příspěvky se navíc evidují v INSTAGRAM_MARKERY.db ve zvolené "
-            "složce pro stahování, odděleně od interní databáze profilů a stavů."
+            "složce databáze, odděleně od interní databáze profilů a stavů."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -459,6 +497,37 @@ class MainWindow(QMainWindow):
         self.scan_worker = worker
         thread.start()
 
+
+    @staticmethod
+    def reference_shortcode(reference_url: str) -> str:
+        value = str(reference_url or "").strip()
+        if not value:
+            return ""
+        match = re.search(
+            r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)",
+            value,
+            re.IGNORECASE,
+        )
+        return match.group(1) if match else ""
+
+    def filter_posts_newer_than_reference(
+        self,
+        posts: list[dict],
+    ) -> tuple[list[dict], bool]:
+        reference_url = self.db.get_setting("reference_url", "")
+        reference = self.reference_shortcode(reference_url)
+        if not reference:
+            return posts, not bool(reference_url.strip())
+
+        newer: list[dict] = []
+        for post in posts:
+            shortcode = str(post.get("shortcode", ""))
+            if shortcode == reference:
+                return newer, True
+            newer.append(post)
+
+        return [], False
+
     @Slot(list)
     def _scan_finished(self, posts: list):
         profile_id = self.scanning_profile_id
@@ -466,7 +535,24 @@ class MainWindow(QMainWindow):
             return
         profile = self.db.profile(profile_id)
         first_scan = bool(profile is not None and not profile["first_scan_done"])
-        total, new_count = self.db.register_scan(profile_id, posts)
+
+        reference_url = self.db.get_setting("reference_url", "").strip()
+        filtered_posts, reference_found = self.filter_posts_newer_than_reference(posts)
+        if reference_url and not reference_found:
+            QMessageBox.warning(
+                self,
+                "Referenční příspěvek",
+                "Referenční post/reel jsem v tomto profilu nenašel. "
+                "Nic jsem do evidence nezapsal.",
+            )
+            return
+
+        posts = filtered_posts
+        total, new_count = self.db.register_scan(
+            profile_id,
+            posts,
+            first_scan_as_new=bool(reference_url),
+        )
         self.refresh_profiles()
         self.select_profile(profile_id)
         self.refresh_posts()
