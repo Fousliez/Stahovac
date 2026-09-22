@@ -1,2 +1,2 @@
 APPLICATION_NAME = "Pornhub Stahovač"
-BUILD_VERSION = "0.1.5"
+BUILD_VERSION = "0.1.6"
