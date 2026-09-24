@@ -1709,6 +1709,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self.download_worker is not None:
             self.download_worker.cancel()
+        if self.download_thread is not None and self.download_thread.isRunning():
+            self.download_thread.quit()
+            self.download_thread.wait(4000)
         super().closeEvent(event)
 
     def open_settings(self):
