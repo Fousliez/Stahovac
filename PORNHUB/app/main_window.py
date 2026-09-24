@@ -10,11 +10,13 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -426,6 +428,7 @@ class MainWindow(QMainWindow):
         self.resize(1120, 760)
         self._build_ui()
         self._apply_style()
+        self.refresh_category_filter()
         self.refresh_jobs()
 
     def _build_ui(self):
@@ -450,6 +453,17 @@ class MainWindow(QMainWindow):
         self.search_edit.setMaximumWidth(420)
         self.search_edit.textChanged.connect(self.filter_jobs)
         top.addWidget(self.search_edit)
+
+        self.category_filter = QComboBox()
+        self.category_filter.setMinimumWidth(170)
+        self.category_filter.currentIndexChanged.connect(
+            lambda _index: self.filter_jobs(self.search_edit.text())
+        )
+        top.addWidget(self.category_filter)
+
+        self.add_category_button = QPushButton("+ Kategorie")
+        self.add_category_button.clicked.connect(self.create_category)
+        top.addWidget(self.add_category_button)
         top.addStretch(1)
 
         top_right = QVBoxLayout()
@@ -489,10 +503,11 @@ class MainWindow(QMainWindow):
         self.count_label.setObjectName("sectionTitle")
         layout.addWidget(self.count_label)
 
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
             [
                 "Název",
+                "Kategorie",
                 "Odkaz",
                 "Poslední kontrola",
                 "Nové",
@@ -614,6 +629,44 @@ class MainWindow(QMainWindow):
 
         return 0.0
 
+    def refresh_category_filter(self):
+        if not hasattr(self, "category_filter"):
+            return
+
+        current = self.category_filter.currentData()
+        self.category_filter.blockSignals(True)
+        self.category_filter.clear()
+        self.category_filter.addItem("Všechny kategorie", "__all__")
+        self.category_filter.addItem("Bez kategorie", "")
+        for category in self.storage.categories():
+            self.category_filter.addItem(category, category)
+
+        index = self.category_filter.findData(current)
+        self.category_filter.setCurrentIndex(index if index >= 0 else 0)
+        self.category_filter.blockSignals(False)
+
+    def create_category(self, assign_urls: list[str] | None = None):
+        value, ok = QInputDialog.getText(
+            self,
+            "Nová kategorie",
+            "Název kategorie:",
+        )
+        if not ok:
+            return
+
+        category = self.storage.add_category(value)
+        if not category:
+            return
+
+        if assign_urls:
+            self.storage.set_category(assign_urls, category)
+
+        self.refresh_category_filter()
+        index = self.category_filter.findData(category)
+        if index >= 0:
+            self.category_filter.setCurrentIndex(index)
+        self.refresh_jobs()
+
     def refresh_jobs(self):
         jobs = self.storage.jobs()
         current = {url for url in self.selected_urls()}
@@ -658,8 +711,10 @@ class MainWindow(QMainWindow):
                 else:
                     status = "Aktuální"
 
+            category = str(job.get("category") or "").strip()
             values = [
                 title,
+                category or "—",
                 url,
                 self.format_last_check(last_run),
                 new_text,
@@ -671,6 +726,7 @@ class MainWindow(QMainWindow):
             last_run_sort = self.last_check_sort_value(last_run)
             sort_values = [
                 title.casefold(),
+                category.casefold(),
                 url.casefold(),
                 last_run_sort,
                 new_count,
@@ -682,7 +738,7 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values):
                 item = SortableTableWidgetItem(value, sort_values[column])
                 item.setData(Qt.UserRole, url)
-                if column in {3, 4, 5}:
+                if column in {4, 5, 6}:
                     item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row, column, item)
 
@@ -700,12 +756,35 @@ class MainWindow(QMainWindow):
 
     def filter_jobs(self, text: str):
         needle = text.strip().casefold()
+        selected_category = (
+            self.category_filter.currentData()
+            if hasattr(self, "category_filter")
+            else "__all__"
+        )
+
+        jobs_by_url = {
+            str(job.get("url") or ""): job
+            for job in self.storage.jobs()
+        }
+
         for row in range(self.table.rowCount()):
             haystack = " ".join(
                 self.table.item(row, col).text() if self.table.item(row, col) else ""
                 for col in range(self.table.columnCount())
             ).casefold()
-            self.table.setRowHidden(row, bool(needle and needle not in haystack))
+
+            row_url_item = self.table.item(row, 0)
+            row_url = str(row_url_item.data(Qt.UserRole) or "") if row_url_item else ""
+            category = str(
+                (jobs_by_url.get(row_url) or {}).get("category") or ""
+            ).strip()
+
+            search_mismatch = bool(needle and needle not in haystack)
+            category_mismatch = bool(
+                selected_category != "__all__"
+                and category.casefold() != str(selected_category or "").casefold()
+            )
+            self.table.setRowHidden(row, search_mismatch or category_mismatch)
 
     def selected_urls(self) -> list[str]:
         model = self.table.selectionModel()
@@ -919,7 +998,13 @@ class MainWindow(QMainWindow):
             return
 
         row = item.row()
-        self.table.selectRow(row)
+        selected_rows = {
+            index.row()
+            for index in self.table.selectionModel().selectedRows()
+        }
+        if row not in selected_rows:
+            self.table.clearSelection()
+            self.table.selectRow(row)
         self.table.setCurrentCell(row, 0)
         url = str(self.table.item(row, 0).data(Qt.UserRole) or "")
 
@@ -928,6 +1013,27 @@ class MainWindow(QMainWindow):
         error_action = menu.addAction("Podrobnosti chyby…")
         job = self.storage.job(url) or {}
         error_action.setEnabled(bool(str(job.get("last_error") or "").strip()))
+
+        category_menu = menu.addMenu("Kategorie")
+        category_actions: list[tuple[object, str]] = []
+        no_category_action = category_menu.addAction("Bez kategorie")
+        category_actions.append((no_category_action, ""))
+        current_category = str(job.get("category") or "").strip()
+        if not current_category:
+            no_category_action.setCheckable(True)
+            no_category_action.setChecked(True)
+
+        for category in self.storage.categories():
+            action = category_menu.addAction(category)
+            action.setCheckable(True)
+            action.setChecked(
+                category.casefold() == current_category.casefold()
+            )
+            category_actions.append((action, category))
+
+        category_menu.addSeparator()
+        new_category_action = category_menu.addAction("Nová kategorie…")
+
         menu.addSeparator()
         current_action = menu.addAction("Nastavit jako aktuální…")
         current_action.setEnabled(
@@ -950,6 +1056,17 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(url))
         elif chosen == error_action:
             self.show_last_error(url)
+        elif chosen == new_category_action:
+            self.create_category(self.selected_urls())
+        elif any(chosen == action for action, _category in category_actions):
+            category = next(
+                category
+                for action, category in category_actions
+                if chosen == action
+            )
+            self.storage.set_category(self.selected_urls(), category)
+            self.refresh_category_filter()
+            self.refresh_jobs()
         elif chosen == current_action:
             self.set_source_current(url)
         elif chosen == delete_action:
@@ -1541,7 +1658,7 @@ class MainWindow(QMainWindow):
         if self._download_paused:
             row = self._row_for_url(url)
             if row >= 0:
-                self.table.item(row, 6).setText("Pozastaveno")
+                self.table.item(row, 7).setText("Pozastaveno")
             return
 
         clean_title = "" if title in {"Stahuji", "Dokončuji"} else title
@@ -1562,7 +1679,7 @@ class MainWindow(QMainWindow):
             return
         if clean_title and self.is_single_video_url(url):
             self.table.item(row, 0).setText(clean_title)
-        self.table.item(row, 6).setText("Stahuji")
+        self.table.item(row, 7).setText("Stahuji")
 
     @Slot(str)
     def _item_cancelled(self, url: str):
