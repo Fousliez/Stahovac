@@ -579,7 +579,7 @@ class MainWindow(QMainWindow):
                 new_text = str(new_count)
                 downloaded_text = str(downloaded_count)
                 total_text = str(total_count)
-                if stored_status.startswith("Stahuji"):
+                if stored_status.startswith(("Stahuji", "Kontroluji")):
                     status = stored_status
                 elif stored_status == "Chyba":
                     status = "Chyba"
@@ -1093,7 +1093,7 @@ class MainWindow(QMainWindow):
         row = self._row_for_url(url)
         if row < 0:
             return
-        if clean_title:
+        if clean_title and self.is_single_video_url(url):
             self.table.item(row, 0).setText(clean_title)
         self.table.item(row, 6).setText("Stahuji")
 
