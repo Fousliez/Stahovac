@@ -625,7 +625,7 @@ def download_url(
     destination: str,
     archive_file: str,
     cookies_file: str = "",
-    progress_callback: Callable[[int, str, str, int, int], None] | None = None,
+    progress_callback: Callable[[int, str, str, str, int, int], None] | None = None,
     completed_callback: Callable[[dict], None] | None = None,
     reference_timestamp: int = 0,
     reference_date_after: str = "",
@@ -679,7 +679,7 @@ def download_url(
         "--print",
         f"before_dl:{_ITEM_PREFIX}%(playlist_index|1)s\t%(playlist_count|1)s\t%(title)s",
         "--progress-template",
-        "download:__STAHOVAC_PROGRESS__%(progress._percent_str)s",
+        "download:__STAHOVAC_PROGRESS__%(progress._percent_str)s\t%(progress._speed_str)s",
         "--print",
         (
             f"after_move:{_DONE_PREFIX}%(id)s\t%(extractor_key)s\t"
@@ -749,6 +749,7 @@ def download_url(
                         0,
                         "downloading",
                         final_title,
+                        "",
                         current_video_index,
                         current_video_total,
                     )
@@ -778,11 +779,19 @@ def download_url(
                     percent = max(0, min(100, int(float(match.group(1)))))
                 except ValueError:
                     percent = 0
+
+                speed = ""
+                if "\t" in line:
+                    speed = line.split("\t", 1)[1].strip()
+                    if speed.casefold() in {"n/a", "na", "none"}:
+                        speed = ""
+
                 if progress_callback is not None:
                     progress_callback(
                         percent,
                         "downloading",
                         final_title,
+                        speed,
                         current_video_index,
                         current_video_total,
                     )
@@ -804,6 +813,7 @@ def download_url(
             100,
             "finished",
             final_title,
+            "",
             current_video_index,
             current_video_total,
         )
