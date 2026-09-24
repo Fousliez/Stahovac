@@ -1932,6 +1932,11 @@ class MainWindow(QMainWindow):
             )
         else:
             self.statusBar().showMessage(f"Stahování hotovo. Položek: {ok_count}", 5000)
+            QMessageBox.information(
+                self,
+                "Hotovo",
+                "Stahování bylo dokončeno.",
+            )
 
     @Slot()
     def _download_cleanup(self):
