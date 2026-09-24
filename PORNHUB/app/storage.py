@@ -324,7 +324,7 @@ class Storage:
             video_id = str(item.get("id", "")).strip()
             if not video_id:
                 continue
-            extractor = str(item.get("extractor", "") or "pornhub").strip().casefold()
+            extractor = "pornhub"
             rows.append(
                 (
                     source,
@@ -582,8 +582,8 @@ class Storage:
         for video_id, extractor, *_rest in rows:
             self._ensure_archive_entry(str(extractor or ""), str(video_id or ""))
 
-        for _source_url, video_id, extractor, *_rest in self._read_known_rows(db_path):
-            self._ensure_archive_entry(str(extractor or "pornhub"), str(video_id or ""))
+        for _source_url, video_id, _extractor, *_rest in self._read_known_rows(db_path):
+            self._ensure_archive_entry("pornhub", str(video_id or ""))
 
     def _ensure_archive_entry(self, extractor: str, video_id: str) -> None:
         video_id = video_id.strip()
