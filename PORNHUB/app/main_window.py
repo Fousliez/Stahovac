@@ -500,9 +500,9 @@ class MainWindow(QMainWindow):
 
         hint = QLabel(
             "„Projít vybrané“ pouze zkontroluje profil nebo seznam a spočítá nové položky. "
-            "Nic nestahuje. „Stáhnout nové“ pak stáhne jen obsah, který není v databázi "
-            "stažených ani ve výchozím známém stavu. Skutečně stažená videa zůstávají "
-            "oddělená od položek označených jako známé."
+            "Nic nestahuje. „Stáhnout nové“ pak stáhne jen obsah, který ještě není známý. "
+            "Videa přeskočená při „Nastavit jako aktuální“ se v aplikaci počítají ve sloupci "
+            "Staženo, ale interně zůstávají oddělená od skutečně fyzicky stažených souborů."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -976,7 +976,7 @@ class MainWindow(QMainWindow):
         self.refresh_jobs()
         self.statusBar().showMessage(
             f"Nastaveno jako aktuální: {len(items)} videí zkontrolováno, "
-            f"{added} nově uloženo jako známých. Nic se nestahovalo.",
+            f"{added} nově označeno jako staženo v aplikaci. Nic se fyzicky nestahovalo.",
             7000,
         )
         if rename_info:
