@@ -390,6 +390,7 @@ def scan_source_with_identity(
 def resolve_reference_cutoff(
     reference_url: str,
     cookies_file: str = "",
+    control: DownloadControl | None = None,
 ) -> tuple[int, str]:
     """Vrátí přesný timestamp a záložní datum pro referenční video."""
     reference = str(reference_url or "").strip()
@@ -415,30 +416,59 @@ def resolve_reference_cutoff(
         cmd.extend(["--cookies", str(Path(cookies_file).expanduser())])
     cmd.append(reference)
 
+    if control is not None and control.cancelled:
+        raise DownloadCancelled("Stahování bylo zrušeno uživatelem.")
+
     try:
-        process = subprocess.run(
+        process = subprocess.Popen(
             cmd,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=180,
             errors="replace",
+            start_new_session=(os.name == "posix"),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
         raise PornhubDownloadError(
             f"Referenční video se nepodařilo načíst: {exc}"
         ) from exc
 
+    if control is not None:
+        control.attach(process)
+
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=180)
+        except subprocess.TimeoutExpired as exc:
+            _send_process_signal(process, signal.SIGTERM)
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                if os.name == "posix":
+                    _send_process_signal(process, signal.SIGKILL)
+                else:
+                    process.kill()
+                stdout, stderr = process.communicate()
+            raise PornhubDownloadError(
+                "Referenční video překročilo časový limit."
+            ) from exc
+    finally:
+        if control is not None:
+            control.detach(process)
+
+    if control is not None and control.cancelled:
+        raise DownloadCancelled("Stahování bylo zrušeno uživatelem.")
+
     if process.returncode != 0:
         message = (
-            process.stderr.strip()
-            or process.stdout.strip()
+            stderr.strip()
+            or stdout.strip()
             or "Referenční video se nepodařilo načíst."
         )
         raise PornhubDownloadError(message)
 
     line = next(
-        (value.strip() for value in process.stdout.splitlines() if value.strip()),
+        (value.strip() for value in stdout.splitlines() if value.strip()),
         "",
     )
     parts = line.split("\t", 1)
