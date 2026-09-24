@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStatusBar,
@@ -174,6 +176,39 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
+class MarkCurrentDialog(QDialog):
+    def __init__(self, label: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nastavit jako aktuální")
+        self.resize(560, 250)
+
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            f"Program projde celý současný obsah {label}.\n\n"
+            "Nic se nebude stahovat. Vše, co je na profilu nyní, bude "
+            "uloženo jako známý obsah. Při dalších kontrolách se jako NOVÉ "
+            "zobrazí pouze obsah přidaný později."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.confirm = QCheckBox(
+            "Rozumím, že současný obsah bude přeskočen."
+        )
+        layout.addWidget(self.confirm)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        self.ok_button = buttons.addButton(
+            "Nastavit aktuální",
+            QDialogButtonBox.AcceptRole,
+        )
+        self.ok_button.setEnabled(False)
+        self.confirm.toggled.connect(self.ok_button.setEnabled)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, data_dir: Path):
         super().__init__()
@@ -185,6 +220,7 @@ class MainWindow(QMainWindow):
         self.download_worker: DownloadWorker | None = None
         self.scanning_profile_id: int | None = None
         self.scan_reference_url = ""
+        self.scan_mark_current = False
         self.downloading_profile_id: int | None = None
         self.download_destination = ""
         self._download_errors: list[str] = []
@@ -255,6 +291,8 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(2, 80)
         self.table.setColumnWidth(3, 80)
         self.table.itemSelectionChanged.connect(self.refresh_posts)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_profile_context_menu)
         layout.addWidget(self.table, 2)
 
         posts_top = QHBoxLayout()
@@ -367,7 +405,16 @@ class MainWindow(QMainWindow):
         for row_index, profile in enumerate(rows):
             new_count = int(profile["new_posts"] or 0)
             total_count = int(profile["total_posts"] or 0)
-            state = "Nové příspěvky" if new_count else "V pořádku"
+            if new_count:
+                state = "Nové příspěvky"
+            elif (
+                profile["current_at"]
+                and profile["last_scan_at"]
+                and profile["current_at"] == profile["last_scan_at"]
+            ):
+                state = "Aktuální"
+            else:
+                state = "V pořádku"
             values = [
                 profile["username"],
                 profile["last_scan_at"] or "Ještě nezkontrolováno",
@@ -448,6 +495,51 @@ class MainWindow(QMainWindow):
                 self.table.setCurrentCell(row, 0)
                 return
 
+    def show_profile_context_menu(self, position):
+        item = self.table.itemAt(position)
+        if item is None:
+            return
+
+        row = item.row()
+        self.table.selectRow(row)
+        self.table.setCurrentCell(row, 0)
+
+        menu = QMenu(self)
+        current_action = menu.addAction("Nastavit jako aktuální…")
+        current_action.setEnabled(
+            self.scan_thread is None and self.download_thread is None
+        )
+        menu.addSeparator()
+        delete_action = menu.addAction("Odstranit profil")
+        delete_action.setEnabled(
+            self.scan_thread is None and self.download_thread is None
+        )
+        chosen = menu.exec(self.table.viewport().mapToGlobal(position))
+
+        if chosen == current_action:
+            self.set_profile_current()
+        elif chosen == delete_action:
+            self.delete_selected_profile()
+
+    def set_profile_current(self):
+        profile_id = self.selected_profile_id()
+        if (
+            profile_id is None
+            or self.scan_thread is not None
+            or self.download_thread is not None
+        ):
+            return
+
+        profile = self.db.profile(profile_id)
+        if profile is None:
+            return
+
+        dialog = MarkCurrentDialog(f"profilu @{profile['username']}", self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self._start_profile_scan("", mark_current=True)
+
     def set_busy(self, busy: bool):
         for button in (
             self.add_button,
@@ -488,7 +580,11 @@ class MainWindow(QMainWindow):
 
         self._start_profile_scan(reference_url)
 
-    def _start_profile_scan(self, reference_url: str):
+    def _start_profile_scan(
+        self,
+        reference_url: str,
+        mark_current: bool = False,
+    ):
         profile_id = self.selected_profile_id()
         if profile_id is None or self.scan_thread is not None or self.download_thread is not None:
             return
@@ -497,8 +593,13 @@ class MainWindow(QMainWindow):
             return
         self.scanning_profile_id = profile_id
         self.scan_reference_url = reference_url
+        self.scan_mark_current = mark_current
         self.set_busy(True)
-        if reference_url:
+        if mark_current:
+            self.statusBar().showMessage(
+                f"Procházím @{profile['username']} a vytvářím výchozí stav…"
+            )
+        elif reference_url:
             self.statusBar().showMessage(
                 f"Procházím novější příspěvky @{profile['username']}…"
             )
@@ -560,10 +661,13 @@ class MainWindow(QMainWindow):
         first_scan = bool(profile is not None and not profile["first_scan_done"])
 
         reference_url = self.scan_reference_url.strip()
-        filtered_posts, reference_found = self.filter_posts_newer_than_reference(
-            posts,
-            reference_url,
-        )
+        if self.scan_mark_current:
+            filtered_posts, reference_found = posts, True
+        else:
+            filtered_posts, reference_found = self.filter_posts_newer_than_reference(
+                posts,
+                reference_url,
+            )
         if reference_url and not reference_found:
             QMessageBox.warning(
                 self,
@@ -579,10 +683,20 @@ class MainWindow(QMainWindow):
             posts,
             first_scan_as_new=bool(reference_url),
         )
+        if self.scan_mark_current:
+            self.db.set_profile_current(profile_id)
+            new_count = 0
+
         self.refresh_profiles()
         self.select_profile(profile_id)
         self.refresh_posts()
-        if first_scan and reference_url:
+        if self.scan_mark_current:
+            self.statusBar().showMessage(
+                f"Nastaveno jako aktuální: {total} příspěvků je známých. "
+                "Nic se nestahovalo.",
+                7000,
+            )
+        elif first_scan and reference_url:
             self.statusBar().showMessage(
                 f"Podle referenčního odkazu nalezeno {total} novějších příspěvků.",
                 5000,
@@ -610,6 +724,7 @@ class MainWindow(QMainWindow):
         self.scan_worker = None
         self.scanning_profile_id = None
         self.scan_reference_url = ""
+        self.scan_mark_current = False
 
     def mark_selected_known(self):
         profile_id = self.selected_profile_id()
