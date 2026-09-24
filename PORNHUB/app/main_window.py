@@ -617,6 +617,29 @@ class MainWindow(QMainWindow):
             }
             QPushButton:hover { background: #f8f8f8; border-color: #9da2aa; }
             QPushButton:disabled { color: #969ba3; background: #eceef0; }
+            QMenu {
+                background: #ffffff;
+                border: 1px solid #bfc3c9;
+                padding: 4px;
+            }
+            QMenu::item {
+                background: transparent;
+                color: #1f2328;
+                padding: 7px 24px 7px 10px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background: #d7e7fb;
+                color: #111111;
+            }
+            QMenu::item:disabled {
+                color: #9aa0a6;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #d9dce1;
+                margin: 4px 6px;
+            }
             QProgressBar {
                 background: #ffffff; border: 1px solid #c9ccd1; border-radius: 5px;
                 min-height: 24px; text-align: center; font-weight: 700;
