@@ -45,6 +45,7 @@ FILTERS = [
     ("Všechny", "all"),
     ("Nové", "new"),
     ("Stažené", "downloaded"),
+    ("Známé", "known"),
 ]
 
 
@@ -260,6 +261,39 @@ class AddProfilesDialog(QDialog):
         ]
 
 
+class MarkCurrentDialog(QDialog):
+    def __init__(self, label: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nastavit jako aktuální")
+        self.resize(560, 250)
+
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            f"Program projde celý současný obsah {label}.\n\n"
+            "Nic se nebude stahovat. Vše, co je na profilu nyní, bude "
+            "uloženo jako známý obsah. Při dalších kontrolách se jako NOVÉ "
+            "zobrazí pouze obsah přidaný později."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.confirm = QCheckBox(
+            "Rozumím, že současný obsah bude přeskočen."
+        )
+        layout.addWidget(self.confirm)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        self.ok_button = buttons.addButton(
+            "Nastavit aktuální",
+            QDialogButtonBox.AcceptRole,
+        )
+        self.ok_button.setEnabled(False)
+        self.confirm.toggled.connect(self.ok_button.setEnabled)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, data_dir: Path):
         super().__init__()
@@ -276,6 +310,7 @@ class MainWindow(QMainWindow):
         self._download_errors: list[str] = []
         self._busy = False
         self._scan_redownload_all = False
+        self._scan_mark_current = False
         self._pending_redownload_username = ""
         self._pending_redownload_items: list[dict] = []
         self._download_redownload_all = False
@@ -632,6 +667,9 @@ class MainWindow(QMainWindow):
         redownload_action = menu.addAction("Stáhnout znovu celý profil")
         redownload_action.setEnabled(not self._busy)
         menu.addSeparator()
+        current_action = menu.addAction("Nastavit jako aktuální…")
+        current_action.setEnabled(not self._busy)
+        menu.addSeparator()
         delete_action = menu.addAction("Odstranit profil")
         delete_action.setEnabled(not self._busy)
         chosen = menu.exec(self.table.viewport().mapToGlobal(position))
@@ -640,8 +678,23 @@ class MainWindow(QMainWindow):
             self.open_selected_profile_url()
         elif chosen == redownload_action:
             self.redownload_entire_profile()
+        elif chosen == current_action:
+            self.set_profile_current()
         elif chosen == delete_action:
             self.delete_selected_profile()
+
+    def set_profile_current(self):
+        if self._busy:
+            return
+        username = self.selected_username()
+        if not username:
+            return
+
+        dialog = MarkCurrentDialog(f"profilu {username}", self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self._start_scan(username, mark_current=True)
 
     def open_selected_profile_url(self):
         username = self.selected_username()
@@ -735,6 +788,8 @@ class MainWindow(QMainWindow):
                 state = "Nezkontrolováno"
             elif new_count:
                 state = f"{new_count} ke stažení"
+            elif str(profile.get("current_at", "")) == last_scan:
+                state = "Aktuální"
             else:
                 state = "V pořádku"
 
@@ -861,26 +916,30 @@ class MainWindow(QMainWindow):
 
         filter_value = self.item_filter.currentData()
         items = self.storage.load_scan(username)
-        rows: list[tuple[dict, bool]] = []
+        rows: list[tuple[dict, bool, bool]] = []
 
         for item in items:
-            downloaded = self.storage.is_marked(username, str(item.get("id", "")))
-            if filter_value == "new" and downloaded:
+            gif_id = str(item.get("id", ""))
+            downloaded = self.storage.is_marked(username, gif_id)
+            known = self.storage.is_known(gif_id) and not downloaded
+            if filter_value == "new" and (downloaded or known):
                 continue
             if filter_value == "downloaded" and not downloaded:
                 continue
-            rows.append((item, downloaded))
+            if filter_value == "known" and not known:
+                continue
+            rows.append((item, downloaded, known))
 
         self.items_table.setSortingEnabled(False)
         self.items_table.setRowCount(len(rows))
-        for row_index, (item_data, downloaded) in enumerate(rows):
+        for row_index, (item_data, downloaded, known) in enumerate(rows):
             gif_id = str(item_data.get("id", ""))
-            status = "Stažený" if downloaded else "NOVÝ"
+            status = "Stažený" if downloaded else ("Známý" if known else "NOVÝ")
             url = str(item_data.get("url", ""))
             values = [gif_id, status, url]
             sort_values = [
                 gif_id.casefold(),
-                1 if downloaded else 0,
+                2 if downloaded else (1 if known else 0),
                 url.casefold(),
             ]
             for column, value in enumerate(values):
@@ -1074,7 +1133,12 @@ class MainWindow(QMainWindow):
 
         self._start_scan(username, redownload_all=True)
 
-    def _start_scan(self, username: str, redownload_all: bool = False):
+    def _start_scan(
+        self,
+        username: str,
+        redownload_all: bool = False,
+        mark_current: bool = False,
+    ):
         if not username or self.scan_thread is not None or self.download_thread is not None:
             return
 
@@ -1084,11 +1148,16 @@ class MainWindow(QMainWindow):
 
         self.scanning_username = username
         self._scan_redownload_all = redownload_all
+        self._scan_mark_current = mark_current
         self._pending_redownload_username = ""
         self._pending_redownload_items = []
         self.set_busy(True)
 
-        if redownload_all:
+        if mark_current:
+            self.statusBar().showMessage(
+                f"Procházím {username} a vytvářím výchozí stav…"
+            )
+        elif redownload_all:
             self.statusBar().showMessage(
                 f"Procházím {username} před úplným stažením…"
             )
@@ -1128,15 +1197,30 @@ class MainWindow(QMainWindow):
 
         self.storage.save_scan(username, items)
         recognized = self.sync_existing_files(username, items)
-        new_count = len(self.storage.new_items(username, items))
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.storage.update_scan_stats(username, now, len(items), new_count)
-        if new_count == 0:
-            self.storage.update_last_update(username, now)
+
+        if self._scan_mark_current:
+            known_added = self.storage.mark_known_many(username, items)
+            new_count = 0
+            self.storage.mark_profile_current(username, now, len(items))
+        else:
+            known_added = 0
+            new_count = len(self.storage.new_items(username, items))
+            self.storage.update_scan_stats(username, now, len(items), new_count)
+            if new_count == 0:
+                self.storage.update_last_update(username, now)
 
         self.refresh_profiles()
         self.select_profile(username)
         self.refresh_items()
+
+        if self._scan_mark_current:
+            self.statusBar().showMessage(
+                f"Nastaveno jako aktuální: {len(items)} položek zkontrolováno, "
+                f"{known_added} nově uloženo jako známých. Nic se nestahovalo.",
+                7000,
+            )
+            return
 
         if self._scan_redownload_all:
             self._pending_redownload_username = username
@@ -1207,6 +1291,7 @@ class MainWindow(QMainWindow):
         self.scan_worker = None
         self.scanning_username = ""
         self._scan_redownload_all = False
+        self._scan_mark_current = False
         self._pending_redownload_username = ""
         self._pending_redownload_items = []
 
