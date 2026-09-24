@@ -875,7 +875,7 @@ class MainWindow(QMainWindow):
     @Slot(str, bool, str, str)
     def _item_finished(self, url: str, success: bool, message: str, title: str):
         if success:
-            changes = {"status": "Hotovo", "progress": 100}
+            changes = {"status": "Aktuální", "progress": 100}
             if title:
                 changes["title"] = title
             self.storage.update_job(url, **changes)
