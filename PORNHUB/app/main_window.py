@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QProgressBar,
@@ -28,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .downloader import download_url, resolve_reference_cutoff
+from .downloader import download_url, resolve_reference_cutoff, scan_url_items
 from .storage import Storage
 from .version import APPLICATION_NAME, BUILD_VERSION
 
@@ -130,6 +132,56 @@ class DownloadWorker(QObject):
                 self.item_finished.emit(url, True, "", title)
 
         self.finished.emit(ok_count, error_count)
+
+
+class BaselineScanWorker(QObject):
+    finished = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, url: str, cookies_file: str):
+        super().__init__()
+        self.url = url
+        self.cookies_file = cookies_file
+
+    @Slot()
+    def run(self):
+        try:
+            self.finished.emit(scan_url_items(self.url, self.cookies_file))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class MarkCurrentDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nastavit jako aktuální")
+        self.resize(580, 250)
+
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            "Program projde celý současný obsah profilu nebo seznamu.\n\n"
+            "Nic se nebude stahovat. Všechna nynější videa budou uložena "
+            "jako známý obsah a při dalším stahování se přeskočí. "
+            "V databázi stažených videí ale jako stažená označena nebudou."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.confirm = QCheckBox(
+            "Rozumím, že současný obsah bude přeskočen."
+        )
+        layout.addWidget(self.confirm)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        self.ok_button = buttons.addButton(
+            "Nastavit aktuální",
+            QDialogButtonBox.AcceptRole,
+        )
+        self.ok_button.setEnabled(False)
+        self.confirm.toggled.connect(self.ok_button.setEnabled)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class AddUrlsDialog(QDialog):
@@ -286,6 +338,9 @@ class MainWindow(QMainWindow):
         self.storage = Storage(data_dir)
         self.download_thread: QThread | None = None
         self.download_worker: DownloadWorker | None = None
+        self.baseline_thread: QThread | None = None
+        self.baseline_worker: BaselineScanWorker | None = None
+        self.baseline_url = ""
         self._current_urls: list[str] = []
 
         self.setWindowTitle(f"{APPLICATION_NAME} {BUILD_VERSION}")
@@ -369,6 +424,8 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.horizontalHeader().setSortIndicator(0, Qt.AscendingOrder)
         self.table.cellDoubleClicked.connect(self.open_row_url)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_job_context_menu)
         layout.addWidget(self.table, 1)
 
         self.progress = QProgressBar()
@@ -530,6 +587,109 @@ class MainWindow(QMainWindow):
                 urls.append(value)
         return urls
 
+    @staticmethod
+    def is_single_video_url(url: str) -> bool:
+        return "view_video.php" in str(url or "").casefold()
+
+    def show_job_context_menu(self, position):
+        item = self.table.itemAt(position)
+        if item is None:
+            return
+
+        row = item.row()
+        self.table.selectRow(row)
+        self.table.setCurrentCell(row, 0)
+        url = str(self.table.item(row, 0).data(Qt.UserRole) or "")
+
+        menu = QMenu(self)
+        open_action = menu.addAction("Otevřít odkaz")
+        current_action = menu.addAction("Nastavit jako aktuální…")
+        current_action.setEnabled(
+            bool(url)
+            and not self.is_single_video_url(url)
+            and self.download_thread is None
+            and self.baseline_thread is None
+        )
+        menu.addSeparator()
+        delete_action = menu.addAction("Odstranit")
+        delete_action.setEnabled(
+            self.download_thread is None and self.baseline_thread is None
+        )
+        chosen = menu.exec(self.table.viewport().mapToGlobal(position))
+
+        if chosen == open_action:
+            QDesktopServices.openUrl(QUrl(url))
+        elif chosen == current_action:
+            self.set_source_current(url)
+        elif chosen == delete_action:
+            self.delete_selected()
+
+    def set_source_current(self, url: str):
+        if (
+            not url
+            or self.is_single_video_url(url)
+            or self.download_thread is not None
+            or self.baseline_thread is not None
+        ):
+            return
+
+        dialog = MarkCurrentDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        cookies_file = self.storage.get_setting("cookies_file", "")
+        thread = QThread(self)
+        worker = BaselineScanWorker(url, cookies_file)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._baseline_finished)
+        worker.failed.connect(self._baseline_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._baseline_cleanup)
+
+        self.baseline_url = url
+        self.baseline_thread = thread
+        self.baseline_worker = worker
+        self.set_busy(True)
+        self.statusBar().showMessage(
+            "Procházím současný obsah a vytvářím výchozí stav…"
+        )
+        thread.start()
+
+    @Slot(list)
+    def _baseline_finished(self, items: list):
+        url = self.baseline_url
+        added = self.storage.mark_known_items(url, items)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.storage.update_job(
+            url,
+            status="Aktuální",
+            progress=0,
+            last_run=now,
+        )
+        self.refresh_jobs()
+        self.statusBar().showMessage(
+            f"Nastaveno jako aktuální: {len(items)} videí zkontrolováno, "
+            f"{added} nově uloženo jako známých. Nic se nestahovalo.",
+            7000,
+        )
+
+    @Slot(str)
+    def _baseline_failed(self, message: str):
+        QMessageBox.warning(self, "Nastavit jako aktuální", message)
+        self.statusBar().showMessage("Výchozí stav se nepodařilo vytvořit.", 5000)
+
+    @Slot()
+    def _baseline_cleanup(self):
+        self.baseline_thread = None
+        self.baseline_worker = None
+        self.baseline_url = ""
+        self.set_busy(False)
+        self.refresh_jobs()
+
     def add_urls(self):
         dialog = AddUrlsDialog(self)
         if dialog.exec() != QDialog.Accepted:
@@ -603,7 +763,7 @@ class MainWindow(QMainWindow):
         self.start_download(urls, reference_url=reference_url)
 
     def start_download(self, urls: list[str], reference_url: str = ""):
-        if self.download_thread is not None:
+        if self.download_thread is not None or self.baseline_thread is not None:
             return
         if not urls:
             self.statusBar().showMessage("Nejdřív vyber nebo přidej odkaz.", 2500)
