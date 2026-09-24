@@ -24,6 +24,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QStatusBar,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
@@ -58,6 +61,42 @@ class SortableTableWidgetItem(QTableWidgetItem):
             except TypeError:
                 return str(self.sort_value).casefold() < str(other.sort_value).casefold()
         return super().__lt__(other)
+
+
+class HoverRowDelegate(QStyledItemDelegate):
+    """Propaguje hover stav na všechny buňky řádku, ne jen na jednu buňku."""
+
+    def paint(self, painter, option, index):
+        table = self.parent()
+        if (
+            isinstance(table, HoverRowTableWidget)
+            and table.hover_row == index.row()
+        ):
+            option = QStyleOptionViewItem(option)
+            option.state |= QStyle.State_MouseOver
+        super().paint(painter, option, index)
+
+
+class HoverRowTableWidget(QTableWidget):
+    def __init__(self, rows: int, columns: int, parent=None):
+        super().__init__(rows, columns, parent)
+        self.hover_row = -1
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self.setItemDelegate(HoverRowDelegate(self))
+
+    def mouseMoveEvent(self, event):
+        row = self.indexAt(event.position().toPoint()).row()
+        if row != self.hover_row:
+            self.hover_row = row
+            self.viewport().update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self.hover_row != -1:
+            self.hover_row = -1
+            self.viewport().update()
+        super().leaveEvent(event)
 
 
 class DownloadWorker(QObject):
@@ -513,7 +552,7 @@ class MainWindow(QMainWindow):
         self.count_label.setObjectName("sectionTitle")
         layout.addWidget(self.count_label)
 
-        self.table = QTableWidget(0, 8)
+        self.table = HoverRowTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
             [
                 "Název",
