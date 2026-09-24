@@ -57,6 +57,11 @@ class Storage:
                 "progress": 0,
                 "last_run": "",
                 "last_error": "",
+                "ph_user_id": "",
+                "ph_profile_name": "",
+                "ph_profile_path": "",
+                "recovery_videos": [],
+                "previous_urls": [],
             })
             known.add(value)
             added += 1
@@ -95,6 +100,84 @@ class Storage:
             if str(job.get("url", "")).strip() == wanted:
                 return job
         return None
+
+    def replace_source_url(self, old_url: str, new_url: str) -> None:
+        """Přejmenuje zdroj bez ztráty scanů, baseline ani historie stahování."""
+        old_value = str(old_url or "").strip()
+        new_value = str(new_url or "").strip()
+        if not old_value or not new_value or old_value == new_value:
+            return
+
+        jobs = self.jobs()
+        old_job = next(
+            (job for job in jobs if str(job.get("url", "")).strip() == old_value),
+            None,
+        )
+        if old_job is None:
+            raise ValueError("Původní profil už není v seznamu.")
+
+        if any(
+            job is not old_job and str(job.get("url", "")).strip() == new_value
+            for job in jobs
+        ):
+            raise ValueError(
+                "Nová adresa profilu už v seznamu existuje. "
+                "Automatická změna proto nebyla provedena."
+            )
+
+        db_path = self.marker_database()
+        self._ensure_marker_schema(db_path)
+        with self._marker_lock, sqlite3.connect(db_path, timeout=30) as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO known_items(
+                    source_url, id, extractor, title, webpage_url, known_at
+                )
+                SELECT ?, id, extractor, title, webpage_url, known_at
+                FROM known_items
+                WHERE source_url = ?
+                """,
+                (new_value, old_value),
+            )
+            connection.execute(
+                "DELETE FROM known_items WHERE source_url = ?",
+                (old_value,),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO source_items(
+                    source_url, id, extractor, title, webpage_url, seen_at
+                )
+                SELECT ?, id, extractor, title, webpage_url, seen_at
+                FROM source_items
+                WHERE source_url = ?
+                """,
+                (new_value, old_value),
+            )
+            connection.execute(
+                "DELETE FROM source_items WHERE source_url = ?",
+                (old_value,),
+            )
+            connection.execute(
+                "UPDATE downloads SET source_url = ? WHERE source_url = ?",
+                (new_value, old_value),
+            )
+            connection.commit()
+
+        previous_urls = old_job.get("previous_urls") or []
+        if not isinstance(previous_urls, list):
+            previous_urls = []
+        previous_urls = [
+            str(value).strip()
+            for value in previous_urls
+            if str(value).strip()
+        ]
+        if old_value not in previous_urls:
+            previous_urls.append(old_value)
+
+        old_job["url"] = new_value
+        old_job["previous_urls"] = previous_urls[-20:]
+        self.save_jobs(jobs)
 
     def get_setting(self, key: str, default: str = "") -> str:
         data = self._read_json(self.settings_file, {})
