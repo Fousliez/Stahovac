@@ -134,6 +134,31 @@ class DownloadWorker(QObject):
         self.finished.emit(ok_count, error_count)
 
 
+class ScanSourcesWorker(QObject):
+    source_started = Signal(str, int, int)
+    source_finished = Signal(str, list, int, int)
+    source_failed = Signal(str, str, int, int)
+    finished = Signal()
+
+    def __init__(self, urls: list[str], cookies_file: str):
+        super().__init__()
+        self.urls = urls
+        self.cookies_file = cookies_file
+
+    @Slot()
+    def run(self):
+        total = len(self.urls)
+        for index, url in enumerate(self.urls, start=1):
+            self.source_started.emit(url, index, total)
+            try:
+                items = scan_url_items(url, self.cookies_file)
+            except Exception as exc:
+                self.source_failed.emit(url, str(exc), index, total)
+            else:
+                self.source_finished.emit(url, items, index, total)
+        self.finished.emit()
+
+
 class BaselineScanWorker(QObject):
     finished = Signal(list)
     failed = Signal(str)
@@ -338,6 +363,8 @@ class MainWindow(QMainWindow):
         self.storage = Storage(data_dir)
         self.download_thread: QThread | None = None
         self.download_worker: DownloadWorker | None = None
+        self.scan_thread: QThread | None = None
+        self.scan_worker: ScanSourcesWorker | None = None
         self.baseline_thread: QThread | None = None
         self.baseline_worker: BaselineScanWorker | None = None
         self.baseline_url = ""
@@ -385,14 +412,14 @@ class MainWindow(QMainWindow):
 
         buttons = QHBoxLayout()
         self.add_button = QPushButton("+ Odkazy")
-        self.download_selected_button = QPushButton("Stáhnout vybrané")
-        self.download_all_button = QPushButton("Stáhnout vše")
+        self.scan_button = QPushButton("Projít vybrané")
+        self.download_new_button = QPushButton("Stáhnout nové")
         self.download_newer_button = QPushButton("Stáhnout novější…")
         self.delete_button = QPushButton("Odstranit")
         for button in (
             self.add_button,
-            self.download_selected_button,
-            self.download_all_button,
+            self.scan_button,
+            self.download_new_button,
             self.download_newer_button,
             self.delete_button,
         ):
@@ -401,8 +428,8 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
 
         self.add_button.clicked.connect(self.add_urls)
-        self.download_selected_button.clicked.connect(self.download_selected)
-        self.download_all_button.clicked.connect(self.download_all)
+        self.scan_button.clicked.connect(self.scan_selected)
+        self.download_new_button.clicked.connect(self.download_new)
         self.download_newer_button.clicked.connect(self.download_newer)
         self.delete_button.clicked.connect(self.delete_selected)
 
@@ -410,9 +437,17 @@ class MainWindow(QMainWindow):
         self.count_label.setObjectName("sectionTitle")
         layout.addWidget(self.count_label)
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["Název", "Odkaz", "Stav", "Průběh", "Poslední kontrola"]
+            [
+                "Název",
+                "Odkaz",
+                "Poslední kontrola",
+                "Nové",
+                "Staženo",
+                "Celkem",
+                "Stav",
+            ]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -442,9 +477,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.download_info_label)
 
         hint = QLabel(
-            "Každé dokončené video se ukládá do databáze PORNHUB_MARKERY.db ve zvolené "
-            "složce databáze. Eviduje ID, název, URL, profil/uploadera, cestu k souboru "
-            "a datum stažení. Databáze zároveň drží pomocný yt-dlp archiv v synchronizaci."
+            "„Projít vybrané“ pouze zkontroluje profil nebo seznam a spočítá nové položky. "
+            "Nic nestahuje. „Stáhnout nové“ pak stáhne jen obsah, který není v databázi "
+            "stažených ani ve výchozím známém stavu. Skutečně stažená videa zůstávají "
+            "oddělená od položek označených jako známé."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -525,33 +561,61 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(len(jobs))
 
         for row, job in enumerate(jobs):
-            title = str(job.get("title") or "Nezjištěno")
             url = str(job.get("url") or "")
-            status = str(job.get("status") or "Připraveno")
-            progress = int(job.get("progress") or 0)
+            title = str(job.get("title") or self.source_label(url))
+            stored_status = str(job.get("status") or "")
             last_run = str(job.get("last_run") or "")
+
+            if self.is_single_video_url(url):
+                total_count = 0
+                downloaded_count = 0
+                new_count = 0
+                status = stored_status or "Připraveno"
+                new_text = "—"
+                downloaded_text = "—"
+                total_text = "—"
+            else:
+                total_count, downloaded_count, new_count = self.storage.scan_counts(url)
+                new_text = str(new_count)
+                downloaded_text = str(downloaded_count)
+                total_text = str(total_count)
+                if stored_status.startswith("Stahuji"):
+                    status = stored_status
+                elif stored_status == "Chyba":
+                    status = "Chyba"
+                elif not last_run:
+                    status = "Nezkontrolováno"
+                elif new_count:
+                    status = f"{new_count} nových"
+                else:
+                    status = "Aktuální"
 
             values = [
                 title,
                 url,
-                status,
-                f"{progress} %",
                 self.format_last_check(last_run),
+                new_text,
+                downloaded_text,
+                total_text,
+                status,
             ]
 
             last_run_sort = self.last_check_sort_value(last_run)
-
             sort_values = [
                 title.casefold(),
                 url.casefold(),
-                status.casefold(),
-                progress,
                 last_run_sort,
+                new_count,
+                downloaded_count,
+                total_count,
+                status.casefold(),
             ]
 
             for column, value in enumerate(values):
                 item = SortableTableWidgetItem(value, sort_values[column])
                 item.setData(Qt.UserRole, url)
+                if column in {3, 4, 5}:
+                    item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row, column, item)
 
             if url in current:
@@ -591,6 +655,21 @@ class MainWindow(QMainWindow):
     def is_single_video_url(url: str) -> bool:
         return "view_video.php" in str(url or "").casefold()
 
+    @staticmethod
+    def source_label(url: str) -> str:
+        try:
+            parsed = urlparse(str(url or ""))
+            parts = [part for part in parsed.path.split("/") if part]
+        except ValueError:
+            parts = []
+
+        ignored = {"videos", "video", "model", "users", "user", "pornstar", "channels"}
+        for part in reversed(parts):
+            if part.casefold() not in ignored:
+                return part
+        return "Nezjištěno"
+
+
     def show_job_context_menu(self, position):
         item = self.table.itemAt(position)
         if item is None:
@@ -608,12 +687,15 @@ class MainWindow(QMainWindow):
             bool(url)
             and not self.is_single_video_url(url)
             and self.download_thread is None
+            and self.scan_thread is None
             and self.baseline_thread is None
         )
         menu.addSeparator()
         delete_action = menu.addAction("Odstranit")
         delete_action.setEnabled(
-            self.download_thread is None and self.baseline_thread is None
+            self.download_thread is None
+            and self.scan_thread is None
+            and self.baseline_thread is None
         )
         chosen = menu.exec(self.table.viewport().mapToGlobal(position))
 
@@ -629,6 +711,7 @@ class MainWindow(QMainWindow):
             not url
             or self.is_single_video_url(url)
             or self.download_thread is not None
+            or self.scan_thread is not None
             or self.baseline_thread is not None
         ):
             return
@@ -662,6 +745,7 @@ class MainWindow(QMainWindow):
     @Slot(list)
     def _baseline_finished(self, items: list):
         url = self.baseline_url
+        self.storage.save_scan(url, items)
         added = self.storage.mark_known_items(url, items)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.storage.update_job(
@@ -724,11 +808,162 @@ class MainWindow(QMainWindow):
         self.storage.delete_urls(urls)
         self.refresh_jobs()
 
-    def download_selected(self):
-        self.start_download(self.selected_urls())
+    def scan_selected(self):
+        if (
+            self.download_thread is not None
+            or self.scan_thread is not None
+            or self.baseline_thread is not None
+        ):
+            return
 
-    def download_all(self):
-        self.start_download([str(job.get("url") or "") for job in self.storage.jobs() if job.get("url")])
+        urls = [
+            url
+            for url in self.selected_urls()
+            if not self.is_single_video_url(url)
+        ]
+        if not urls:
+            self.statusBar().showMessage(
+                "Vyber alespoň jeden profil nebo seznam. Samostatné video kontrolu nepotřebuje.",
+                4000,
+            )
+            return
+
+        cookies_file = self.storage.get_setting("cookies_file", "")
+        thread = QThread(self)
+        worker = ScanSourcesWorker(urls, cookies_file)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.source_started.connect(self._scan_source_started)
+        worker.source_finished.connect(self._scan_source_finished)
+        worker.source_failed.connect(self._scan_source_failed)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._scan_cleanup)
+
+        self.scan_thread = thread
+        self.scan_worker = worker
+        self.set_busy(True)
+        self.progress.setRange(0, max(1, len(urls)))
+        self.progress.setValue(0)
+        self.progress.setFormat("Kontrola • 0/%m • %p%")
+        self.progress.show()
+        self.download_info_label.setText("Připravuji kontrolu…")
+        self.download_info_label.show()
+        thread.start()
+
+    @Slot(str, int, int)
+    def _scan_source_started(self, url: str, index: int, total: int):
+        label = self.source_label(url)
+        self.progress.setRange(0, max(1, total))
+        self.progress.setValue(max(0, index - 1))
+        self.progress.setFormat(f"Kontrola {index}/{total} • %p%")
+        self.download_info_label.setText(
+            f"Kontroluji {index}/{total} • {label}"
+        )
+        self.storage.update_job(url, status="Kontroluji…", progress=0)
+        self.refresh_jobs()
+
+    @Slot(str, list, int, int)
+    def _scan_source_finished(
+        self,
+        url: str,
+        items: list,
+        index: int,
+        total: int,
+    ):
+        self.storage.save_scan(url, items)
+        total_count, downloaded_count, new_count = self.storage.scan_counts(url)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        status = f"{new_count} nových" if new_count else "Aktuální"
+        self.storage.update_job(
+            url,
+            title=self.source_label(url),
+            status=status,
+            progress=0,
+            last_run=now,
+        )
+        self.progress.setValue(index)
+        self.download_info_label.setText(
+            f"Kontrola {index}/{total} • {total_count} celkem • "
+            f"{new_count} nových • {downloaded_count} stažených"
+        )
+        self.refresh_jobs()
+
+    @Slot(str, str, int, int)
+    def _scan_source_failed(
+        self,
+        url: str,
+        message: str,
+        index: int,
+        total: int,
+    ):
+        self.storage.update_job(url, status="Chyba", progress=0)
+        self.progress.setValue(index)
+        self.refresh_jobs()
+        self.statusBar().showMessage(
+            f"Kontrola {index}/{total} se nepodařila: {message}",
+            8000,
+        )
+
+    @Slot()
+    def _scan_cleanup(self):
+        self.scan_thread = None
+        self.scan_worker = None
+        self.set_busy(False)
+        self.progress.hide()
+        self.download_info_label.hide()
+        self.refresh_jobs()
+
+    def download_new(self):
+        if (
+            self.download_thread is not None
+            or self.scan_thread is not None
+            or self.baseline_thread is not None
+        ):
+            return
+
+        selected = self.selected_urls()
+        if not selected:
+            self.statusBar().showMessage("Nejdřív vyber odkaz.", 2500)
+            return
+
+        targets: list[str] = []
+        unscanned: list[str] = []
+        for url in selected:
+            if self.is_single_video_url(url):
+                targets.append(url)
+                continue
+
+            job = next(
+                (
+                    item
+                    for item in self.storage.jobs()
+                    if str(item.get("url") or "") == url
+                ),
+                {},
+            )
+            last_check = str(job.get("last_run") or "")
+            if not last_check:
+                unscanned.append(url)
+                continue
+
+            _total, _downloaded, new_count = self.storage.scan_counts(url)
+            if new_count > 0:
+                targets.append(url)
+
+        if not targets:
+            if unscanned:
+                self.statusBar().showMessage(
+                    "Nejdřív použij „Projít vybrané“. U nezkontrolovaného profilu "
+                    "ještě nevíme, co je nové.",
+                    5000,
+                )
+            else:
+                self.statusBar().showMessage("Žádné nové video ke stažení.", 3000)
+            return
+
+        self.start_download(targets)
 
     def download_newer(self):
         urls = self.selected_urls()
@@ -763,7 +998,11 @@ class MainWindow(QMainWindow):
         self.start_download(urls, reference_url=reference_url)
 
     def start_download(self, urls: list[str], reference_url: str = ""):
-        if self.download_thread is not None or self.baseline_thread is not None:
+        if (
+            self.download_thread is not None
+            or self.scan_thread is not None
+            or self.baseline_thread is not None
+        ):
             return
         if not urls:
             self.statusBar().showMessage("Nejdřív vyber nebo přidej odkaz.", 2500)
@@ -811,7 +1050,6 @@ class MainWindow(QMainWindow):
             url,
             status=f"Stahuji {index}/{total}",
             progress=0,
-            last_run=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
         self.statusBar().showMessage(f"Stahuji {index}/{total}…")
         self.download_info_label.setText(
@@ -857,8 +1095,7 @@ class MainWindow(QMainWindow):
             return
         if clean_title:
             self.table.item(row, 0).setText(clean_title)
-        self.table.item(row, 2).setText("Stahuji")
-        self.table.item(row, 3).setText(f"{percent} %")
+        self.table.item(row, 6).setText("Stahuji")
 
     @Slot(dict)
     def _video_downloaded(self, item: dict):
@@ -875,9 +1112,18 @@ class MainWindow(QMainWindow):
     @Slot(str, bool, str, str)
     def _item_finished(self, url: str, success: bool, message: str, title: str):
         if success:
-            changes = {"status": "Aktuální", "progress": 100}
-            if title:
-                changes["title"] = title
+            if self.is_single_video_url(url):
+                changes = {"status": "Aktuální", "progress": 100}
+                if title:
+                    changes["title"] = title
+            else:
+                _total, _downloaded, new_count = self.storage.scan_counts(url)
+                changes = {
+                    "status": (
+                        f"{new_count} nových" if new_count else "Aktuální"
+                    ),
+                    "progress": 100,
+                }
             self.storage.update_job(url, **changes)
         else:
             self.storage.update_job(url, status="Chyba", progress=0)
@@ -918,8 +1164,8 @@ class MainWindow(QMainWindow):
     def set_busy(self, busy: bool):
         for button in (
             self.add_button,
-            self.download_selected_button,
-            self.download_all_button,
+            self.scan_button,
+            self.download_new_button,
             self.download_newer_button,
             self.delete_button,
             self.settings_button,
