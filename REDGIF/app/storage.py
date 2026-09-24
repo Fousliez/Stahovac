@@ -23,6 +23,7 @@ class Storage:
 
         self._marker_lock = threading.RLock()
         self._marker_ids: set[str] = set()
+        self._known_ids: set[str] = set()
         self._init_marker_database()
 
     @staticmethod
@@ -83,6 +84,10 @@ class Storage:
                 profile["checked"] = False
                 changed = True
 
+            if "current_at" not in profile:
+                profile["current_at"] = ""
+                changed = True
+
         if changed:
             self._save_profiles(profiles)
 
@@ -108,6 +113,7 @@ class Storage:
                 "total": 0,
                 "new": 0,
                 "checked": False,
+                "current_at": "",
             }
         )
         profiles.sort(key=lambda p: str(p.get("username", "")).casefold())
@@ -166,6 +172,19 @@ class Storage:
                 break
         self._save_profiles(profiles)
 
+    def mark_profile_current(self, username: str, timestamp: str, total: int) -> None:
+        profiles = self.profiles()
+        needle = username.casefold()
+        for profile in profiles:
+            if str(profile.get("username", "")).casefold() == needle:
+                profile["last_scan"] = timestamp
+                profile["last_update"] = timestamp
+                profile["current_at"] = timestamp
+                profile["total"] = int(total)
+                profile["new"] = 0
+                break
+        self._save_profiles(profiles)
+
     def get_setting(self, key: str, default: str = "") -> str:
         data = self._read_json(self.settings_file, {})
         if not isinstance(data, dict):
@@ -174,6 +193,7 @@ class Storage:
 
     def set_setting(self, key: str, value: str) -> None:
         existing_ids = set(self._marker_ids) if key == "download_dir" else None
+        existing_known_ids = set(self._known_ids) if key == "download_dir" else None
 
         data = self._read_json(self.settings_file, {})
         if not isinstance(data, dict):
@@ -193,8 +213,13 @@ class Storage:
             ids |= existing_ids or set()
             self._insert_marker_ids(db_path, ids)
 
+            known_ids = self._read_known_ids(db_path)
+            known_ids |= existing_known_ids or set()
+            self._insert_known_ids(db_path, known_ids)
+
             with self._marker_lock:
                 self._marker_ids = ids
+                self._known_ids = known_ids
 
     def scan_path(self, username: str) -> Path:
         return self.scans_dir / f"{self.safe_name(username)}.json"
@@ -220,6 +245,40 @@ class Storage:
             return False
         with self._marker_lock:
             return marker_id in self._marker_ids
+
+    def is_known(self, gif_id: str) -> bool:
+        marker_id = self.normalize_marker_id(gif_id)
+        if not marker_id:
+            return False
+        with self._marker_lock:
+            return marker_id in self._known_ids
+
+    def mark_known_many(self, username: str, items: list[dict]) -> int:
+        ids = {
+            marker_id
+            for item in items
+            if (marker_id := self.normalize_marker_id(str(item.get("id", ""))))
+        }
+        if not ids:
+            return 0
+
+        db_path = self.marker_database()
+        self._ensure_marker_schema(db_path)
+        rows = [(marker_id, username) for marker_id in ids]
+
+        with self._marker_lock:
+            before = len(self._known_ids)
+            with sqlite3.connect(db_path, timeout=30) as connection:
+                connection.executemany(
+                    """
+                    INSERT OR IGNORE INTO known_items (id, profile)
+                    VALUES (?, ?)
+                    """,
+                    rows,
+                )
+                connection.commit()
+            self._known_ids |= ids
+            return len(self._known_ids) - before
 
     def mark(self, username: str, gif_id: str) -> None:
         marker_id = self.normalize_marker_id(gif_id)
@@ -262,10 +321,15 @@ class Storage:
 
         with self._marker_lock:
             marker_ids = self._marker_ids
+            known_ids = self._known_ids
             return [
                 item
                 for item in items
-                if self.normalize_marker_id(str(item.get("id", ""))) not in marker_ids
+                if (
+                    (marker_id := self.normalize_marker_id(str(item.get("id", ""))))
+                    and marker_id not in marker_ids
+                    and marker_id not in known_ids
+                )
             ]
 
     def _init_marker_database(self) -> None:
@@ -278,8 +342,11 @@ class Storage:
             ids |= self._read_legacy_ids(db_path.parent)
             self._insert_marker_ids(db_path, ids)
 
+        known_ids = self._read_known_ids(db_path)
+
         with self._marker_lock:
             self._marker_ids = ids
+            self._known_ids = known_ids
 
     @staticmethod
     def _ensure_marker_schema(path: Path) -> None:
@@ -295,7 +362,19 @@ class Storage:
                 """
             )
             connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS known_items (
+                    id TEXT PRIMARY KEY,
+                    profile TEXT,
+                    known_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_downloads_profile ON downloads(profile)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_known_items_profile ON known_items(profile)"
             )
             connection.commit()
 
@@ -313,6 +392,33 @@ class Storage:
             for (raw_id,) in rows
             if (marker_id := self.normalize_marker_id(str(raw_id)))
         }
+
+    def _read_known_ids(self, path: Path) -> set[str]:
+        if not path.exists():
+            return set()
+        try:
+            with sqlite3.connect(path, timeout=30) as connection:
+                rows = connection.execute("SELECT id FROM known_items").fetchall()
+        except sqlite3.Error:
+            return set()
+
+        return {
+            marker_id
+            for (raw_id,) in rows
+            if (marker_id := self.normalize_marker_id(str(raw_id)))
+        }
+
+    def _insert_known_ids(self, path: Path, ids: set[str]) -> None:
+        if not ids:
+            return
+        self._ensure_marker_schema(path)
+        rows = [(marker_id,) for marker_id in ids]
+        with sqlite3.connect(path, timeout=30) as connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO known_items (id) VALUES (?)",
+                rows,
+            )
+            connection.commit()
 
     def _insert_marker_ids(self, path: Path, ids: set[str]) -> None:
         if not ids:
