@@ -84,6 +84,7 @@ class Storage:
 
     def set_setting(self, key: str, value: str) -> None:
         old_rows = self._read_database_rows(self.marker_database()) if key == "marker_dir" else []
+        old_known_rows = self._read_known_rows(self.marker_database()) if key == "marker_dir" else []
 
         data = self._read_json(self.settings_file, {})
         if not isinstance(data, dict):
@@ -95,6 +96,7 @@ class Storage:
             new_db = self.marker_database()
             self._ensure_marker_schema(new_db)
             self._insert_download_rows(new_db, old_rows)
+            self._insert_known_rows(new_db, old_known_rows)
 
     def remove_setting(self, key: str) -> None:
         data = self._read_json(self.settings_file, {})
@@ -158,6 +160,57 @@ class Storage:
 
         self._ensure_archive_entry(str(extractor).strip(), marker_id)
 
+    def mark_known_items(self, source_url: str, items: list[dict]) -> int:
+        source = str(source_url or "").strip()
+        rows: list[tuple[str, str, str, str, str]] = []
+        for item in items:
+            video_id = str(item.get("id", "")).strip()
+            if not video_id:
+                continue
+            extractor = str(item.get("extractor", "") or "pornhub").strip().casefold()
+            rows.append(
+                (
+                    source,
+                    video_id,
+                    extractor,
+                    str(item.get("title", "")).strip(),
+                    str(item.get("webpage_url", "")).strip(),
+                )
+            )
+
+        if not rows:
+            return 0
+
+        db_path = self.marker_database()
+        self._ensure_marker_schema(db_path)
+        with self._marker_lock, sqlite3.connect(db_path, timeout=30) as connection:
+            before = connection.total_changes
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO known_items(
+                    source_url, id, extractor, title, webpage_url
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            added = connection.total_changes - before
+            connection.commit()
+
+        for _source, video_id, extractor, _title, _webpage_url in rows:
+            self._ensure_archive_entry(extractor, video_id)
+        return int(added)
+
+    def known_count(self, source_url: str) -> int:
+        source = str(source_url or "").strip()
+        db_path = self.marker_database()
+        self._ensure_marker_schema(db_path)
+        with self._marker_lock, sqlite3.connect(db_path, timeout=30) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM known_items WHERE source_url = ?",
+                (source,),
+            ).fetchone()
+        return int(row[0] if row else 0)
+
     def is_downloaded(self, video_id: str) -> bool:
         marker_id = str(video_id).strip()
         if not marker_id:
@@ -198,6 +251,20 @@ class Storage:
                     downloaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS known_items (
+                    source_url TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    extractor TEXT,
+                    title TEXT,
+                    webpage_url TEXT,
+                    known_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(source_url, id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_known_items_source_url
+                    ON known_items(source_url);
+                CREATE INDEX IF NOT EXISTS idx_known_items_id
+                    ON known_items(id);
                 CREATE INDEX IF NOT EXISTS idx_downloads_uploader
                     ON downloads(uploader);
                 CREATE INDEX IF NOT EXISTS idx_downloads_source_url
@@ -222,6 +289,36 @@ class Storage:
                 ).fetchall()
         except sqlite3.Error:
             return []
+
+    @staticmethod
+    def _read_known_rows(path: Path) -> list[tuple]:
+        if not path.exists():
+            return []
+        try:
+            with sqlite3.connect(path, timeout=30) as connection:
+                return connection.execute(
+                    """
+                    SELECT source_url, id, extractor, title, webpage_url, known_at
+                    FROM known_items
+                    """
+                ).fetchall()
+        except sqlite3.Error:
+            return []
+
+    def _insert_known_rows(self, path: Path, rows: list[tuple]) -> None:
+        if not rows:
+            return
+        self._ensure_marker_schema(path)
+        with sqlite3.connect(path, timeout=30) as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO known_items(
+                    source_url, id, extractor, title, webpage_url, known_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            connection.commit()
 
     def _insert_download_rows(self, path: Path, rows: list[tuple]) -> None:
         if not rows:
@@ -274,15 +371,19 @@ class Storage:
             connection.commit()
 
     def sync_archive_from_database(self) -> None:
-        rows = self._read_database_rows(self.marker_database())
+        db_path = self.marker_database()
+        rows = self._read_database_rows(db_path)
         for video_id, extractor, *_rest in rows:
             self._ensure_archive_entry(str(extractor or ""), str(video_id or ""))
+
+        for _source_url, video_id, extractor, *_rest in self._read_known_rows(db_path):
+            self._ensure_archive_entry(str(extractor or "pornhub"), str(video_id or ""))
 
     def _ensure_archive_entry(self, extractor: str, video_id: str) -> None:
         video_id = video_id.strip()
         if not video_id:
             return
-        extractor = extractor.strip()
+        extractor = extractor.strip().casefold()
         line = f"{extractor} {video_id}".strip()
 
         try:
