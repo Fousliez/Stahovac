@@ -620,12 +620,16 @@ def download_url(
     completed_callback: Callable[[dict], None] | None = None,
     reference_timestamp: int = 0,
     reference_date_after: str = "",
+    control: DownloadControl | None = None,
 ) -> str:
     """Stáhne URL přes stejný CLI režim yt-dlp, který je ověřený ručně.
 
     Záměrně nepoužíváme Python YoutubeDL API. Pornhub momentálně vyžaduje
     browser impersonaci a CLI cesta se na cílovém systému chová spolehlivě.
     """
+    if control is not None and control.cancelled:
+        raise DownloadCancelled("Stahování bylo zrušeno uživatelem.")
+
     target = Path(destination).expanduser()
     target.mkdir(parents=True, exist_ok=True)
 
@@ -683,9 +687,13 @@ def download_url(
             stderr=subprocess.STDOUT,
             bufsize=1,
             errors="replace",
+            start_new_session=(os.name == "posix"),
         )
     except OSError as exc:
         raise PornhubDownloadError(f"yt-dlp se nepodařilo spustit: {exc}") from exc
+
+    if control is not None:
+        control.attach(process)
 
     recent_output: deque[str] = deque(maxlen=120)
     final_title = ""
@@ -693,71 +701,82 @@ def download_url(
     current_video_total = 1
     assert process.stdout is not None
 
-    for raw_line in process.stdout:
-        line = raw_line.rstrip()
-        if not line:
-            continue
+    try:
+        for raw_line in process.stdout:
+            if control is not None and control.cancelled:
+                break
 
-        recent_output.append(line)
+            line = raw_line.rstrip()
+            if not line:
+                continue
 
-        if line.startswith(_ITEM_PREFIX):
-            payload = line[len(_ITEM_PREFIX):]
-            parts = payload.split("\t", 2)
-            try:
-                current_video_index = max(1, int(parts[0]))
-            except (ValueError, IndexError):
-                current_video_index = 1
-            try:
-                current_video_total = max(1, int(parts[1]))
-            except (ValueError, IndexError):
-                current_video_total = 1
-            title = parts[2].strip() if len(parts) > 2 else ""
-            if title:
-                final_title = title
-            if progress_callback is not None:
-                progress_callback(
-                    0,
-                    "downloading",
-                    final_title,
-                    current_video_index,
-                    current_video_total,
-                )
-            continue
+            recent_output.append(line)
 
-        if line.startswith(_DONE_PREFIX):
-            payload = line[len(_DONE_PREFIX):]
-            parts = payload.split("\t", 5)
-            item = {
-                "id": parts[0].strip() if len(parts) > 0 else "",
-                "extractor": parts[1].strip() if len(parts) > 1 else "",
-                "webpage_url": parts[2].strip() if len(parts) > 2 else "",
-                "uploader": parts[3].strip() if len(parts) > 3 else "",
-                "title": parts[4].strip() if len(parts) > 4 else "",
-                "filepath": parts[5].strip() if len(parts) > 5 else "",
-                "source_url": url,
-            }
-            if item["title"]:
-                final_title = item["title"]
-            if completed_callback is not None and item["id"]:
-                completed_callback(item)
-            continue
+            if line.startswith(_ITEM_PREFIX):
+                payload = line[len(_ITEM_PREFIX):]
+                parts = payload.split("\t", 2)
+                try:
+                    current_video_index = max(1, int(parts[0]))
+                except (ValueError, IndexError):
+                    current_video_index = 1
+                try:
+                    current_video_total = max(1, int(parts[1]))
+                except (ValueError, IndexError):
+                    current_video_total = 1
+                title = parts[2].strip() if len(parts) > 2 else ""
+                if title:
+                    final_title = title
+                if progress_callback is not None:
+                    progress_callback(
+                        0,
+                        "downloading",
+                        final_title,
+                        current_video_index,
+                        current_video_total,
+                    )
+                continue
 
-        match = _PROGRESS_RE.search(line)
-        if match:
-            try:
-                percent = max(0, min(100, int(float(match.group(1)))))
-            except ValueError:
-                percent = 0
-            if progress_callback is not None:
-                progress_callback(
-                    percent,
-                    "downloading",
-                    final_title,
-                    current_video_index,
-                    current_video_total,
-                )
+            if line.startswith(_DONE_PREFIX):
+                payload = line[len(_DONE_PREFIX):]
+                parts = payload.split("\t", 5)
+                item = {
+                    "id": parts[0].strip() if len(parts) > 0 else "",
+                    "extractor": parts[1].strip() if len(parts) > 1 else "",
+                    "webpage_url": parts[2].strip() if len(parts) > 2 else "",
+                    "uploader": parts[3].strip() if len(parts) > 3 else "",
+                    "title": parts[4].strip() if len(parts) > 4 else "",
+                    "filepath": parts[5].strip() if len(parts) > 5 else "",
+                    "source_url": url,
+                }
+                if item["title"]:
+                    final_title = item["title"]
+                if completed_callback is not None and item["id"]:
+                    completed_callback(item)
+                continue
 
-    returncode = process.wait()
+            match = _PROGRESS_RE.search(line)
+            if match:
+                try:
+                    percent = max(0, min(100, int(float(match.group(1)))))
+                except ValueError:
+                    percent = 0
+                if progress_callback is not None:
+                    progress_callback(
+                        percent,
+                        "downloading",
+                        final_title,
+                        current_video_index,
+                        current_video_total,
+                    )
+
+        returncode = process.wait()
+    finally:
+        if control is not None:
+            control.detach(process)
+
+    if control is not None and control.cancelled:
+        raise DownloadCancelled("Stahování bylo zrušeno uživatelem.")
+
     if returncode != 0:
         message = "\n".join(recent_output).strip() or f"yt-dlp skončil s kódem {returncode}."
         raise PornhubDownloadError(message)
