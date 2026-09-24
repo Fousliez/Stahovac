@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
 from collections import deque
 from datetime import datetime, timedelta
 from collections.abc import Callable
+from html import unescape
+from http.cookiejar import MozillaCookieJar
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
+
+from curl_cffi import requests as curl_requests
 
 
 class PornhubDownloadError(RuntimeError):
@@ -28,6 +34,251 @@ NETWORK_ARGS = [
 _PROGRESS_RE = re.compile(r"__STAHOVAC_PROGRESS__\s*([0-9]+(?:\.[0-9]+)?)%")
 _ITEM_PREFIX = "__STAHOVAC_ITEM__"
 _DONE_PREFIX = "__STAHOVAC_DONE__"
+_PROFILE_SOURCE_RE = re.compile(
+    r"/(?:(?:user|channel)s|model|pornstar)/[^/?#]+(?:/videos(?:/(?:public|upload))?)?/?$",
+    re.I,
+)
+
+
+def is_profile_source_url(url: str) -> bool:
+    try:
+        path = urlparse(str(url or "")).path
+    except ValueError:
+        return False
+    return bool(_PROFILE_SOURCE_RE.search(path))
+
+
+def _profile_videos_url(profile_path: str, source_url: str) -> str:
+    path = str(profile_path or "").strip()
+    if not path.startswith("/"):
+        return ""
+    path = path.rstrip("/") + "/videos"
+
+    try:
+        parsed = urlparse(str(source_url or ""))
+    except ValueError:
+        parsed = urlparse("https://www.pornhub.com/")
+
+    scheme = parsed.scheme or "https"
+    netloc = parsed.netloc or "www.pornhub.com"
+    return urlunparse((scheme, netloc, path, "", "", ""))
+
+
+def _normalized_source_url(url: str) -> str:
+    try:
+        parsed = urlparse(str(url or ""))
+    except ValueError:
+        return str(url or "").strip().casefold()
+    return f"{parsed.netloc.casefold()}{parsed.path.rstrip('/').casefold()}"
+
+
+def _cookies_for_request(cookies_file: str = "") -> dict[str, str]:
+    cookies = {
+        "age_verified": "1",
+        "accessAgeDisclaimerPH": "1",
+        "accessPH": "1",
+    }
+    path = str(cookies_file or "").strip()
+    if not path:
+        return cookies
+
+    try:
+        jar = MozillaCookieJar()
+        jar.load(str(Path(path).expanduser()), ignore_discard=True, ignore_expires=True)
+        for cookie in jar:
+            cookies[cookie.name] = cookie.value
+    except (OSError, ValueError):
+        # Cookies jsou pro veřejná videa volitelné. Chybný nebo zastaralý
+        # soubor nesmí zablokovat samotnou obnovu profilu.
+        pass
+    return cookies
+
+
+def extract_profile_identity_from_video(
+    video_url: str,
+    cookies_file: str = "",
+) -> dict:
+    """Z videa vytáhne interní Pornhub user_id a aktuální profilový odkaz."""
+    url = str(video_url or "").strip()
+    if not url:
+        raise PornhubDownloadError("Chybí odkaz na záložní video.")
+
+    try:
+        response = curl_requests.get(
+            url,
+            impersonate="chrome",
+            headers={"Referer": "https://www.pornhub.com/"},
+            cookies=_cookies_for_request(cookies_file),
+            timeout=60,
+        )
+    except Exception as exc:
+        raise PornhubDownloadError(
+            f"Záložní video se nepodařilo otevřít: {exc}"
+        ) from exc
+
+    if int(getattr(response, "status_code", 0) or 0) >= 400:
+        raise PornhubDownloadError(
+            f"Záložní video vrátilo HTTP {response.status_code}."
+        )
+
+    html = str(getattr(response, "text", "") or "")
+    if not html:
+        raise PornhubDownloadError("Záložní video vrátilo prázdnou stránku.")
+
+    profile_name = ""
+    profile_path = ""
+    model_match = re.search(
+        r"var\s+MODEL_PROFILE\s*=\s*(\{.*?\});",
+        html,
+        re.S,
+    )
+    if model_match:
+        try:
+            model_profile = json.loads(model_match.group(1))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            model_profile = {}
+        profile_name = str(model_profile.get("username") or "").strip()
+        profile_path = str(model_profile.get("modelProfileLink") or "").strip()
+
+    user_id = ""
+    up_id_match = re.search(
+        r"""['"]up_id['"]\s*:\s*['"](\d+)['"]""",
+        html,
+        re.I,
+    )
+    if up_id_match:
+        user_id = up_id_match.group(1)
+
+    if not user_id and profile_path:
+        linked_id = re.search(
+            rf"""data-userid=['"](\d+)['"][^>]*>[\s\S]{{0,1800}}?
+                 href=['"]{re.escape(profile_path)}['"]""",
+            html,
+            re.I | re.X,
+        )
+        if linked_id:
+            user_id = linked_id.group(1)
+
+    if not user_id:
+        generic_id = re.search(r"""data-userid=['"](\d+)['"]""", html, re.I)
+        if generic_id:
+            user_id = generic_id.group(1)
+
+    if not profile_path:
+        linked_profile = re.search(
+            r"""href=['"](?P<path>/(?:(?:user|channel)s|model|pornstar)/[^'"]+)['"]
+                [^>]*>(?P<name>[^<]+)<""",
+            html,
+            re.I | re.X,
+        )
+        if linked_profile:
+            profile_path = linked_profile.group("path")
+            if not profile_name:
+                profile_name = unescape(linked_profile.group("name")).strip()
+
+    if not user_id or not profile_path:
+        raise PornhubDownloadError(
+            "U záložního videa se nepodařilo zjistit interní ID a profil autora."
+        )
+
+    return {
+        "user_id": user_id,
+        "profile_name": unescape(profile_name).strip(),
+        "profile_path": profile_path,
+        "source_video_url": url,
+    }
+
+
+def _video_url_from_item(item: dict) -> str:
+    webpage_url = str(item.get("webpage_url") or "").strip()
+    if "view_video.php" in webpage_url.casefold():
+        return webpage_url
+    video_id = str(item.get("id") or "").strip()
+    if not video_id:
+        return ""
+    return f"https://www.pornhub.com/view_video.php?viewkey={video_id}"
+
+
+def scan_source_with_identity(
+    url: str,
+    cookies_file: str = "",
+    profile_meta: dict | None = None,
+) -> tuple[list[dict], dict]:
+    """Projede zdroj a při rozbité profilové URL zkusí dohledat přejmenování."""
+    source = str(url or "").strip()
+    meta = profile_meta if isinstance(profile_meta, dict) else {}
+    expected_user_id = str(meta.get("ph_user_id") or "").strip()
+    recovery_videos = meta.get("recovery_videos") or []
+    if not isinstance(recovery_videos, list):
+        recovery_videos = []
+
+    try:
+        items = scan_url_items(source, cookies_file)
+    except Exception as original_exc:
+        if not (is_profile_source_url(source) and expected_user_id and recovery_videos):
+            raise
+
+        checked = 0
+        for recovery_url in recovery_videos[:30]:
+            recovery_url = str(recovery_url or "").strip()
+            if not recovery_url:
+                continue
+            checked += 1
+            try:
+                identity = extract_profile_identity_from_video(
+                    recovery_url,
+                    cookies_file,
+                )
+            except Exception:
+                continue
+
+            if str(identity.get("user_id") or "") != expected_user_id:
+                continue
+
+            new_url = _profile_videos_url(
+                str(identity.get("profile_path") or ""),
+                source,
+            )
+            if not new_url or _normalized_source_url(new_url) == _normalized_source_url(source):
+                continue
+
+            try:
+                recovered_items = scan_url_items(new_url, cookies_file)
+            except Exception:
+                continue
+
+            identity.update(
+                {
+                    "renamed": True,
+                    "old_url": source,
+                    "new_url": new_url,
+                    "recovered_from": recovery_url,
+                }
+            )
+            return recovered_items, identity
+
+        raise PornhubDownloadError(
+            f"{original_exc}\n\n"
+            f"Automatická kontrola přejmenování zkusila {checked} uložených videí, "
+            "ale nový profil se nepodařilo bezpečně potvrdit."
+        ) from original_exc
+
+    identity: dict = {}
+    if is_profile_source_url(source) and not expected_user_id:
+        for item in items[:3]:
+            recovery_url = _video_url_from_item(item)
+            if not recovery_url:
+                continue
+            try:
+                identity = extract_profile_identity_from_video(
+                    recovery_url,
+                    cookies_file,
+                )
+            except Exception:
+                continue
+            break
+
+    return items, identity
 
 
 def resolve_reference_cutoff(
