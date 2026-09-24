@@ -462,7 +462,7 @@ class MainWindow(QMainWindow):
         top.addWidget(self.category_filter)
 
         self.add_category_button = QPushButton("+ Kategorie")
-        self.add_category_button.clicked.connect(self.create_category)
+        self.add_category_button.clicked.connect(lambda _checked=False: self.create_category())
         top.addWidget(self.add_category_button)
         top.addStretch(1)
 
