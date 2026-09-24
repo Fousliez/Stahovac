@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 from collections import deque
 from datetime import datetime, timedelta
 from collections.abc import Callable
@@ -17,6 +20,109 @@ from curl_cffi import requests as curl_requests
 
 class PornhubDownloadError(RuntimeError):
     pass
+
+
+class DownloadCancelled(PornhubDownloadError):
+    pass
+
+
+def _send_process_signal(process: subprocess.Popen | None, sig: int) -> bool:
+    if process is None or process.poll() is not None:
+        return False
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, sig)
+        else:
+            if sig == signal.SIGTERM:
+                process.terminate()
+            else:
+                return False
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+class DownloadControl:
+    """Thread-safe ovládání běžícího yt-dlp procesu z GUI."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._process: subprocess.Popen | None = None
+        self._paused = False
+        self._cancelled = False
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    @property
+    def paused(self) -> bool:
+        with self._lock:
+            return self._paused
+
+    def attach(self, process: subprocess.Popen) -> None:
+        with self._lock:
+            self._process = process
+            cancelled = self._cancelled
+            paused = self._paused
+
+        if cancelled:
+            _send_process_signal(process, signal.SIGTERM)
+        elif paused and os.name == "posix":
+            _send_process_signal(process, signal.SIGSTOP)
+
+    def detach(self, process: subprocess.Popen) -> None:
+        with self._lock:
+            if self._process is process:
+                self._process = None
+
+    def pause(self) -> bool:
+        with self._lock:
+            if self._cancelled:
+                return False
+            self._paused = True
+            process = self._process
+
+        if process is None:
+            return True
+        if os.name != "posix":
+            return False
+        return _send_process_signal(process, signal.SIGSTOP)
+
+    def resume(self) -> bool:
+        with self._lock:
+            if self._cancelled:
+                return False
+            was_paused = self._paused
+            self._paused = False
+            process = self._process
+
+        if not was_paused:
+            return True
+        if process is None:
+            return True
+        if os.name != "posix":
+            return False
+        return _send_process_signal(process, signal.SIGCONT)
+
+    def cancel(self) -> bool:
+        with self._lock:
+            already_cancelled = self._cancelled
+            self._cancelled = True
+            was_paused = self._paused
+            self._paused = False
+            process = self._process
+
+        if already_cancelled:
+            return True
+        if process is None:
+            return True
+
+        if was_paused and os.name == "posix":
+            _send_process_signal(process, signal.SIGCONT)
+        _send_process_signal(process, signal.SIGTERM)
+        return True
 
 
 BEST_FORMAT = "best[protocol=https][ext=mp4]/best"
