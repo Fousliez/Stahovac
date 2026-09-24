@@ -790,8 +790,34 @@ class MainWindow(QMainWindow):
         if invalid:
             QMessageBox.warning(self, "Odkazy", "Tahle část přijímá jen odkazy z Pornhubu.")
             return
+
+        existing = {
+            str(job.get("url") or "").strip()
+            for job in self.storage.jobs()
+        }
+        added_urls = [
+            url.strip()
+            for url in urls
+            if url.strip() and url.strip() not in existing
+        ]
+
         added = self.storage.add_urls(urls)
         self.refresh_jobs()
+
+        if added_urls:
+            self.table.clearSelection()
+            first_row = -1
+            wanted = set(added_urls)
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                row_url = str(item.data(Qt.UserRole) or "") if item else ""
+                if row_url in wanted:
+                    self.table.selectRow(row)
+                    if first_row < 0:
+                        first_row = row
+            if first_row >= 0:
+                self.table.setCurrentCell(first_row, 0)
+
         self.statusBar().showMessage(f"Přidáno odkazů: {added}", 3000)
 
     def delete_selected(self):
