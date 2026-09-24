@@ -625,7 +625,18 @@ class MainWindow(QMainWindow):
             QTableWidget {
                 background: #ffffff; alternate-background-color: #f8f9fa;
                 border: 1px solid #c9ccd1; gridline-color: #e1e3e6;
-                selection-background-color: #dfe8f6; selection-color: #111111;
+                selection-background-color: #d7e7fb; selection-color: #111111;
+            }
+            QTableWidget::item:hover {
+                background: #edf2f7;
+            }
+            QTableWidget::item:selected {
+                background: #d7e7fb;
+                color: #111111;
+            }
+            QTableWidget::item:selected:!active {
+                background: #d7e7fb;
+                color: #111111;
             }
             QHeaderView::section {
                 background: #e8eaed; border: 0; border-right: 1px solid #cfd2d6;
