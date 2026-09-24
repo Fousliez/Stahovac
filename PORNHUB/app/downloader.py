@@ -78,6 +78,9 @@ class DownloadControl:
                 self._process = None
 
     def pause(self) -> bool:
+        if os.name != "posix":
+            return False
+
         with self._lock:
             if self._cancelled:
                 return False
@@ -86,8 +89,6 @@ class DownloadControl:
 
         if process is None:
             return True
-        if os.name != "posix":
-            return False
         return _send_process_signal(process, signal.SIGSTOP)
 
     def resume(self) -> bool:
@@ -122,6 +123,14 @@ class DownloadControl:
         if was_paused and os.name == "posix":
             _send_process_signal(process, signal.SIGCONT)
         _send_process_signal(process, signal.SIGTERM)
+
+        if os.name == "posix":
+            def force_kill():
+                threading.Event().wait(3)
+                if process.poll() is None:
+                    _send_process_signal(process, signal.SIGKILL)
+
+            threading.Thread(target=force_kill, daemon=True).start()
         return True
 
 
