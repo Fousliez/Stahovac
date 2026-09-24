@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
 )
 
 from .downloader import (
+    DownloadCancelled,
+    DownloadControl,
     download_url,
     resolve_reference_cutoff,
     scan_source_with_identity,
@@ -60,9 +62,10 @@ class DownloadWorker(QObject):
     item_started = Signal(str, int, int)
     item_progress = Signal(str, int, str, int, int, int, int)
     item_finished = Signal(str, bool, str, str)
+    item_cancelled = Signal(str)
     video_downloaded = Signal(dict)
     failed = Signal(str)
-    finished = Signal(int, int)
+    finished = Signal(int, int, bool)
 
     def __init__(
         self,
@@ -78,6 +81,16 @@ class DownloadWorker(QObject):
         self.archive_file = archive_file
         self.cookies_file = cookies_file
         self.reference_url = reference_url
+        self.control = DownloadControl()
+
+    def pause(self) -> bool:
+        return self.control.pause()
+
+    def resume(self) -> bool:
+        return self.control.resume()
+
+    def cancel(self) -> bool:
+        return self.control.cancel()
 
     @Slot()
     def run(self):
@@ -89,12 +102,20 @@ class DownloadWorker(QObject):
             reference_timestamp, reference_date_after = resolve_reference_cutoff(
                 self.reference_url,
                 self.cookies_file,
+                self.control,
             )
+        except DownloadCancelled:
+            self.finished.emit(0, 0, True)
+            return
         except Exception as exc:
             self.failed.emit(str(exc))
             return
 
+        cancelled = False
         for index, url in enumerate(self.urls, start=1):
+            if self.control.cancelled:
+                cancelled = True
+                break
             self.item_started.emit(url, index, total)
 
             def progress(
@@ -127,7 +148,12 @@ class DownloadWorker(QObject):
                     completed_callback=self.video_downloaded.emit,
                     reference_timestamp=reference_timestamp,
                     reference_date_after=reference_date_after,
+                    control=self.control,
                 )
+            except DownloadCancelled:
+                cancelled = True
+                self.item_cancelled.emit(url)
+                break
             except Exception as exc:
                 error_count += 1
                 self.item_finished.emit(url, False, str(exc), "")
@@ -135,7 +161,7 @@ class DownloadWorker(QObject):
                 ok_count += 1
                 self.item_finished.emit(url, True, "", title)
 
-        self.finished.emit(ok_count, error_count)
+        self.finished.emit(ok_count, error_count, cancelled)
 
 
 class ScanSourcesWorker(QObject):
