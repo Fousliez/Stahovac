@@ -1490,15 +1490,29 @@ class MainWindow(QMainWindow):
     @Slot(str, int, int)
     def _item_started(self, url: str, index: int, total: int):
         self._active_download_url = url
+        if self._download_cancel_requested:
+            self.storage.update_job(
+                url,
+                status="Ruším…",
+                progress=0,
+                last_error="",
+            )
+            self.refresh_jobs()
+            return
+
+        status = "Pozastaveno" if self._download_paused else f"Stahuji {index}/{total}"
         self.storage.update_job(
             url,
-            status=f"Stahuji {index}/{total}",
+            status=status,
             progress=0,
         )
-        self.statusBar().showMessage(f"Stahuji {index}/{total}…")
-        self.download_info_label.setText(
-            f"Video {index}/{total} • připravuji…"
-        )
+        if self._download_paused:
+            self.download_info_label.setText("Stahování je pozastavené.")
+        else:
+            self.statusBar().showMessage(f"Stahuji {index}/{total}…")
+            self.download_info_label.setText(
+                f"Video {index}/{total} • připravuji…"
+            )
         self.refresh_jobs()
 
     def _row_for_url(self, url: str) -> int:
@@ -1520,6 +1534,15 @@ class MainWindow(QMainWindow):
         video_total: int,
     ):
         self.progress.setValue(percent)
+
+        if self._download_cancel_requested:
+            return
+
+        if self._download_paused:
+            row = self._row_for_url(url)
+            if row >= 0:
+                self.table.item(row, 6).setText("Pozastaveno")
+            return
 
         clean_title = "" if title in {"Stahuji", "Dokončuji"} else title
         if video_total > 1:
@@ -1682,6 +1705,11 @@ class MainWindow(QMainWindow):
             self.settings_button,
         ):
             button.setDisabled(busy)
+
+    def closeEvent(self, event):
+        if self.download_worker is not None:
+            self.download_worker.cancel()
+        super().closeEvent(event)
 
     def open_settings(self):
         SettingsDialog(self.storage, self).exec()
