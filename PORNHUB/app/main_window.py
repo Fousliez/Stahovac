@@ -417,6 +417,10 @@ class MainWindow(QMainWindow):
         self.baseline_worker: BaselineScanWorker | None = None
         self.baseline_url = ""
         self._current_urls: list[str] = []
+        self._active_download_url = ""
+        self._download_paused = False
+        self._paused_info_text = ""
+        self._download_cancel_requested = False
 
         self.setWindowTitle(f"{APPLICATION_NAME} {BUILD_VERSION}")
         self.resize(1120, 760)
@@ -510,6 +514,20 @@ class MainWindow(QMainWindow):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_job_context_menu)
         layout.addWidget(self.table, 1)
+
+        download_controls = QHBoxLayout()
+        self.pause_download_button = QPushButton("Pozastavit")
+        self.cancel_download_button = QPushButton("Zrušit stahování")
+        self.pause_download_button.clicked.connect(self.toggle_pause_download)
+        self.cancel_download_button.clicked.connect(self.cancel_download)
+        self.pause_download_button.setEnabled(False)
+        self.cancel_download_button.setEnabled(False)
+        self.pause_download_button.hide()
+        self.cancel_download_button.hide()
+        download_controls.addWidget(self.pause_download_button)
+        download_controls.addWidget(self.cancel_download_button)
+        download_controls.addStretch(1)
+        layout.addLayout(download_controls)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -627,10 +645,12 @@ class MainWindow(QMainWindow):
                 new_text = str(new_count)
                 downloaded_text = str(downloaded_count)
                 total_text = str(total_count)
-                if stored_status.startswith(("Stahuji", "Kontroluji")):
+                if stored_status.startswith(
+                    ("Stahuji", "Kontroluji", "Pozastaveno", "Ruším")
+                ):
                     status = stored_status
-                elif stored_status == "Chyba":
-                    status = "Chyba"
+                elif stored_status in {"Chyba", "Zrušeno"}:
+                    status = stored_status
                 elif not last_run:
                     status = "Nezkontrolováno"
                 elif new_count:
@@ -1368,6 +1388,7 @@ class MainWindow(QMainWindow):
         worker.item_started.connect(self._item_started)
         worker.item_progress.connect(self._item_progress)
         worker.item_finished.connect(self._item_finished)
+        worker.item_cancelled.connect(self._item_cancelled)
         worker.video_downloaded.connect(self._video_downloaded)
         worker.failed.connect(self._download_failed)
         worker.finished.connect(self._download_finished)
@@ -1380,17 +1401,95 @@ class MainWindow(QMainWindow):
         self.download_thread = thread
         self.download_worker = worker
         self._current_urls = list(urls)
+        self._active_download_url = ""
+        self._download_paused = False
+        self._paused_info_text = ""
+        self._download_cancel_requested = False
         for url in urls:
             self.storage.update_job(url, last_error="")
         self.set_busy(True)
+        self.pause_download_button.setText("Pozastavit")
+        self.pause_download_button.setEnabled(True)
+        self.cancel_download_button.setEnabled(True)
+        self.pause_download_button.show()
+        self.cancel_download_button.show()
         self.progress.setValue(0)
         self.progress.show()
         self.download_info_label.setText(f"Videa: 0/{len(urls)} • Připravuji stahování…")
         self.download_info_label.show()
         thread.start()
 
+    def toggle_pause_download(self):
+        worker = self.download_worker
+        if worker is None or self._download_cancel_requested:
+            return
+
+        if self._download_paused:
+            if not worker.resume():
+                self.statusBar().showMessage(
+                    "Stahování se nepodařilo znovu spustit.",
+                    5000,
+                )
+                return
+            self._download_paused = False
+            self.pause_download_button.setText("Pozastavit")
+            if self._active_download_url:
+                self.storage.update_job(
+                    self._active_download_url,
+                    status="Stahuji",
+                )
+            if self._paused_info_text:
+                self.download_info_label.setText(self._paused_info_text)
+            self.statusBar().showMessage("Stahování pokračuje.", 3000)
+            self.refresh_jobs()
+            return
+
+        if not worker.pause():
+            self.statusBar().showMessage(
+                "Pozastavení stahování se nepodařilo.",
+                5000,
+            )
+            return
+
+        self._download_paused = True
+        self._paused_info_text = self.download_info_label.text()
+        self.pause_download_button.setText("Pokračovat")
+        if self._active_download_url:
+            self.storage.update_job(
+                self._active_download_url,
+                status="Pozastaveno",
+            )
+        self.download_info_label.setText("Stahování je pozastavené.")
+        self.statusBar().showMessage(
+            "Stahování pozastaveno. Tlačítkem „Pokračovat“ ho obnovíš."
+        )
+        self.refresh_jobs()
+
+    def cancel_download(self):
+        worker = self.download_worker
+        if worker is None or self._download_cancel_requested:
+            return
+
+        self._download_cancel_requested = True
+        self._download_paused = False
+        self.pause_download_button.setText("Pozastavit")
+        self.pause_download_button.setEnabled(False)
+        self.cancel_download_button.setEnabled(False)
+        worker.cancel()
+
+        if self._active_download_url:
+            self.storage.update_job(
+                self._active_download_url,
+                status="Ruším…",
+                last_error="",
+            )
+        self.download_info_label.setText("Ruším stahování…")
+        self.statusBar().showMessage("Ruším stahování…")
+        self.refresh_jobs()
+
     @Slot(str, int, int)
     def _item_started(self, url: str, index: int, total: int):
+        self._active_download_url = url
         self.storage.update_job(
             url,
             status=f"Stahuji {index}/{total}",
@@ -1441,6 +1540,21 @@ class MainWindow(QMainWindow):
         if clean_title and self.is_single_video_url(url):
             self.table.item(row, 0).setText(clean_title)
         self.table.item(row, 6).setText("Stahuji")
+
+    @Slot(str)
+    def _item_cancelled(self, url: str):
+        self.storage.update_job(
+            url,
+            status="Zrušeno",
+            progress=0,
+            last_error="",
+        )
+        self.statusBar().showMessage(
+            "Stahování bylo zrušeno. Rozpracovaný .part soubor může yt-dlp "
+            "při příštím stahování navázat.",
+            7000,
+        )
+        self.refresh_jobs()
 
     @Slot(dict)
     def _video_downloaded(self, item: dict):
@@ -1499,8 +1613,23 @@ class MainWindow(QMainWindow):
             message,
         )
 
-    @Slot(int, int)
-    def _download_finished(self, ok_count: int, error_count: int):
+    @Slot(int, int, bool)
+    def _download_finished(
+        self,
+        ok_count: int,
+        error_count: int,
+        cancelled: bool,
+    ):
+        if cancelled:
+            self.download_info_label.setText(
+                f"Stahování zrušeno • dokončeno: {ok_count} • chyby: {error_count}"
+            )
+            self.statusBar().showMessage(
+                f"Stahování zrušeno. Dokončeno před zrušením: {ok_count}.",
+                7000,
+            )
+            return
+
         self.progress.setValue(100 if error_count == 0 else self.progress.value())
         total = ok_count + error_count
         self.download_info_label.setText(
@@ -1529,8 +1658,18 @@ class MainWindow(QMainWindow):
         self.download_thread = None
         self.download_worker = None
         self._current_urls = []
+        self._active_download_url = ""
+        self._download_paused = False
+        self._paused_info_text = ""
+        self._download_cancel_requested = False
+        self.pause_download_button.setText("Pozastavit")
+        self.pause_download_button.setEnabled(False)
+        self.cancel_download_button.setEnabled(False)
+        self.pause_download_button.hide()
+        self.cancel_download_button.hide()
         self.set_busy(False)
         self.progress.hide()
+        self.download_info_label.hide()
         self.refresh_jobs()
 
     def set_busy(self, busy: bool):
