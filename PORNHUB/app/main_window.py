@@ -10,7 +10,6 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -25,6 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QStatusBar,
+    QTabBar,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -453,17 +453,6 @@ class MainWindow(QMainWindow):
         self.search_edit.setMaximumWidth(420)
         self.search_edit.textChanged.connect(self.filter_jobs)
         top.addWidget(self.search_edit)
-
-        self.category_filter = QComboBox()
-        self.category_filter.setMinimumWidth(170)
-        self.category_filter.currentIndexChanged.connect(
-            lambda _index: self.filter_jobs(self.search_edit.text())
-        )
-        top.addWidget(self.category_filter)
-
-        self.add_category_button = QPushButton("+ Kategorie")
-        self.add_category_button.clicked.connect(lambda _checked=False: self.create_category())
-        top.addWidget(self.add_category_button)
         top.addStretch(1)
 
         top_right = QVBoxLayout()
@@ -475,6 +464,27 @@ class MainWindow(QMainWindow):
         top_right.addWidget(self.open_folder_button)
         top.addLayout(top_right)
         layout.addLayout(top)
+
+        category_row = QHBoxLayout()
+        category_row.setSpacing(6)
+
+        self.category_tabs = QTabBar()
+        self.category_tabs.setObjectName("categoryTabs")
+        self.category_tabs.setDrawBase(False)
+        self.category_tabs.setExpanding(False)
+        self.category_tabs.setMovable(False)
+        self.category_tabs.setUsesScrollButtons(True)
+        self.category_tabs.currentChanged.connect(
+            lambda _index: self.filter_jobs(self.search_edit.text())
+        )
+        category_row.addWidget(self.category_tabs, 1)
+
+        self.add_category_button = QPushButton("+ Kategorie")
+        self.add_category_button.clicked.connect(
+            lambda _checked=False: self.create_category()
+        )
+        category_row.addWidget(self.add_category_button)
+        layout.addLayout(category_row)
 
         buttons = QHBoxLayout()
         self.add_button = QPushButton("+ Odkazy")
@@ -579,9 +589,31 @@ class MainWindow(QMainWindow):
             QLabel#sectionTitle { font-size: 13px; font-weight: 800; color: #30343a; }
             QLabel#hint { color: #6b7078; padding: 6px 2px; }
             QLabel#downloadInfo { color: #30343a; font-weight: 700; padding: 3px 2px; }
-            QPushButton, QComboBox, QLineEdit, QTextEdit {
+            QPushButton, QLineEdit, QTextEdit {
                 background: #ffffff; border: 1px solid #c9ccd1; border-radius: 5px;
                 padding: 6px 10px; min-height: 20px;
+            }
+            QTabBar#categoryTabs {
+                background: transparent;
+            }
+            QTabBar#categoryTabs::tab {
+                background: #e4e6e9;
+                border: 1px solid #c9ccd1;
+                border-bottom: 2px solid #c9ccd1;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                padding: 8px 16px;
+                margin-right: 3px;
+                font-weight: 700;
+                color: #4a4f56;
+            }
+            QTabBar#categoryTabs::tab:selected {
+                background: #ffffff;
+                color: #18191b;
+                border-bottom: 2px solid #ffffff;
+            }
+            QTabBar#categoryTabs::tab:hover:!selected {
+                background: #f0f1f3;
             }
             QPushButton:hover { background: #f8f8f8; border-color: #9da2aa; }
             QPushButton:disabled { color: #969ba3; background: #eceef0; }
@@ -630,20 +662,38 @@ class MainWindow(QMainWindow):
         return 0.0
 
     def refresh_category_filter(self):
-        if not hasattr(self, "category_filter"):
+        if not hasattr(self, "category_tabs"):
             return
 
-        current = self.category_filter.currentData()
-        self.category_filter.blockSignals(True)
-        self.category_filter.clear()
-        self.category_filter.addItem("Všechny kategorie", "__all__")
-        self.category_filter.addItem("Bez kategorie", "")
-        for category in self.storage.categories():
-            self.category_filter.addItem(category, category)
+        current_index = self.category_tabs.currentIndex()
+        current = (
+            self.category_tabs.tabData(current_index)
+            if current_index >= 0
+            else "__all__"
+        )
 
-        index = self.category_filter.findData(current)
-        self.category_filter.setCurrentIndex(index if index >= 0 else 0)
-        self.category_filter.blockSignals(False)
+        self.category_tabs.blockSignals(True)
+        while self.category_tabs.count():
+            self.category_tabs.removeTab(0)
+
+        index = self.category_tabs.addTab("Všechny")
+        self.category_tabs.setTabData(index, "__all__")
+
+        for category in self.storage.categories():
+            index = self.category_tabs.addTab(category)
+            self.category_tabs.setTabData(index, category)
+
+        index = self.category_tabs.addTab("Bez kategorie")
+        self.category_tabs.setTabData(index, "")
+
+        wanted_index = 0
+        for tab_index in range(self.category_tabs.count()):
+            if self.category_tabs.tabData(tab_index) == current:
+                wanted_index = tab_index
+                break
+
+        self.category_tabs.setCurrentIndex(wanted_index)
+        self.category_tabs.blockSignals(False)
 
     def create_category(self, assign_urls: list[str] | None = None):
         value, ok = QInputDialog.getText(
@@ -662,9 +712,10 @@ class MainWindow(QMainWindow):
             self.storage.set_category(assign_urls, category)
 
         self.refresh_category_filter()
-        index = self.category_filter.findData(category)
-        if index >= 0:
-            self.category_filter.setCurrentIndex(index)
+        for index in range(self.category_tabs.count()):
+            if self.category_tabs.tabData(index) == category:
+                self.category_tabs.setCurrentIndex(index)
+                break
         self.refresh_jobs()
 
     def refresh_jobs(self):
@@ -756,11 +807,11 @@ class MainWindow(QMainWindow):
 
     def filter_jobs(self, text: str):
         needle = text.strip().casefold()
-        selected_category = (
-            self.category_filter.currentData()
-            if hasattr(self, "category_filter")
-            else "__all__"
-        )
+        selected_category = "__all__"
+        if hasattr(self, "category_tabs"):
+            index = self.category_tabs.currentIndex()
+            if index >= 0:
+                selected_category = self.category_tabs.tabData(index)
 
         jobs_by_url = {
             str(job.get("url") or ""): job
