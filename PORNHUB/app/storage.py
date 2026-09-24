@@ -348,7 +348,10 @@ class Storage:
                 SELECT
                     COUNT(*) AS total_count,
                     SUM(
-                        CASE WHEN d.id IS NOT NULL THEN 1 ELSE 0 END
+                        CASE
+                            WHEN d.id IS NOT NULL OR k.id IS NOT NULL THEN 1
+                            ELSE 0
+                        END
                     ) AS downloaded_count,
                     SUM(
                         CASE
