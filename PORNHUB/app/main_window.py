@@ -101,7 +101,7 @@ class HoverRowTableWidget(QTableWidget):
 
 class DownloadWorker(QObject):
     item_started = Signal(str, int, int)
-    item_progress = Signal(str, int, str, int, int, int, int)
+    item_progress = Signal(str, int, str, str, int, int, int, int)
     item_finished = Signal(str, bool, str, str)
     item_cancelled = Signal(str)
     video_downloaded = Signal(dict)
@@ -163,6 +163,7 @@ class DownloadWorker(QObject):
                 percent: int,
                 status: str,
                 title: str,
+                speed: str,
                 video_index: int,
                 video_total: int,
             ):
@@ -173,6 +174,7 @@ class DownloadWorker(QObject):
                     url,
                     percent,
                     title or label,
+                    speed,
                     index,
                     total,
                     video_index,
@@ -1655,8 +1657,9 @@ class MainWindow(QMainWindow):
         self.pause_download_button.show()
         self.cancel_download_button.show()
         self.progress.setValue(0)
+        self.progress.setFormat("Připravuji… • %p%")
         self.progress.show()
-        self.download_info_label.setText(f"Videa: 0/{len(urls)} • Připravuji stahování…")
+        self.download_info_label.setText("Připravuji stahování…")
         self.download_info_label.show()
         thread.start()
 
@@ -1728,6 +1731,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ruším stahování…")
         self.refresh_jobs()
 
+    def _download_profile_name(self, url: str) -> str:
+        job = self.storage.job(url) or {}
+        return str(
+            job.get("ph_profile_name")
+            or job.get("title")
+            or self.source_label(url)
+            or "Neznámý profil"
+        ).strip()
+
     @Slot(str, int, int)
     def _item_started(self, url: str, index: int, total: int):
         self._active_download_url = url
@@ -1747,13 +1759,19 @@ class MainWindow(QMainWindow):
             status=status,
             progress=0,
         )
+        profile_name = self._download_profile_name(url)
         if self._download_paused:
-            self.download_info_label.setText("Stahování je pozastavené.")
-        else:
-            self.statusBar().showMessage(f"Stahuji {index}/{total}…")
             self.download_info_label.setText(
-                f"Video {index}/{total} • připravuji…"
+                f"Profil: {profile_name} • pozastaveno"
             )
+        else:
+            self.statusBar().showMessage(
+                f"Stahuji profil: {profile_name}"
+            )
+            self.download_info_label.setText(
+                f"Profil: {profile_name} • Rychlost: zjišťuji…"
+            )
+            self.progress.setFormat("Připravuji video… • %p%")
         self.refresh_jobs()
 
     def _row_for_url(self, url: str) -> int:
@@ -1763,12 +1781,13 @@ class MainWindow(QMainWindow):
                 return row
         return -1
 
-    @Slot(str, int, str, int, int, int, int)
+    @Slot(str, int, str, str, int, int, int, int)
     def _item_progress(
         self,
         url: str,
         percent: int,
-        title: str,
+        _title: str,
+        speed: str,
         url_index: int,
         url_total: int,
         video_index: int,
@@ -1785,25 +1804,22 @@ class MainWindow(QMainWindow):
                 self.table.item(row, 7).setText("Pozastaveno")
             return
 
-        clean_title = "" if title in {"Stahuji", "Dokončuji"} else title
+        profile_name = self._download_profile_name(url)
+        speed_text = speed.strip() or "—"
+        self.download_info_label.setText(
+            f"Profil: {profile_name} • Rychlost: {speed_text}"
+        )
+
         if video_total > 1:
-            info = (
-                f"Odkaz {url_index}/{url_total} • "
-                f"Video {video_index}/{video_total} • {percent} %"
+            self.progress.setFormat(
+                f"Video {video_index}/{video_total} • %p%"
             )
         else:
-            info = f"Video {url_index}/{url_total} • {percent} %"
-
-        if clean_title:
-            info += f" • {clean_title}"
-        self.download_info_label.setText(info)
+            self.progress.setFormat("Video 1/1 • %p%")
 
         row = self._row_for_url(url)
-        if row < 0:
-            return
-        if clean_title and self.is_single_video_url(url):
-            self.table.item(row, 0).setText(clean_title)
-        self.table.item(row, 7).setText("Stahuji")
+        if row >= 0:
+            self.table.item(row, 7).setText("Stahuji")
 
     @Slot(str)
     def _item_cancelled(self, url: str):
