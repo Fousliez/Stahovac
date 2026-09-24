@@ -651,6 +651,15 @@ def download_url(
         "yt_dlp",
         "--no-config",
         *NETWORK_ARGS,
+    ]
+
+    # U profilu/seznamu nesmí jedno dočasně nedostupné video shodit celou
+    # frontu. Nedokončené video se nezapíše do markerů ani archivu, takže
+    # při příštím spuštění zůstane mezi novými a zkusí se znovu.
+    if "view_video.php" not in str(url or "").casefold():
+        cmd.append("--ignore-errors")
+
+    cmd.extend([
         "--newline",
         "--progress",
         "--impersonate",
@@ -676,7 +685,7 @@ def download_url(
             f"after_move:{_DONE_PREFIX}%(id)s\t%(extractor_key)s\t"
             "%(webpage_url)s\t%(uploader|)s\t%(title)s\t%(filepath)s"
         ),
-    ]
+    ])
 
     if cookies_file.strip():
         cmd.extend(["--cookies", str(Path(cookies_file).expanduser())])
