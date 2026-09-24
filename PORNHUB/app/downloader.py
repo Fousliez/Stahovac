@@ -99,6 +99,87 @@ def resolve_reference_cutoff(
 
 
 
+def scan_url_items(
+    url: str,
+    cookies_file: str = "",
+) -> list[dict]:
+    """Projede profil/seznam bez stahování a vrátí současná video ID."""
+    source = str(url or "").strip()
+    if not source:
+        return []
+
+    prefix = "__STAHOVAC_SCAN__"
+    cmd = [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--no-config",
+        "--skip-download",
+        "--flat-playlist",
+        "--impersonate",
+        "Chrome-145:Macos-26",
+        "--add-header",
+        "Referer:https://www.pornhub.com/",
+        "--print",
+        f"{prefix}%(id)s\t%(extractor_key|pornhub)s\t%(title|)s\t%(webpage_url|)s",
+    ]
+    if cookies_file.strip():
+        cmd.extend(["--cookies", str(Path(cookies_file).expanduser())])
+    cmd.append(source)
+
+    try:
+        process = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=1800,
+            errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PornhubDownloadError(
+            f"Profil nebo seznam se nepodařilo projít: {exc}"
+        ) from exc
+
+    if process.returncode != 0:
+        message = (
+            process.stderr.strip()
+            or process.stdout.strip()
+            or "Profil nebo seznam se nepodařilo projít."
+        )
+        raise PornhubDownloadError(message)
+
+    items: dict[str, dict] = {}
+    for raw_line in process.stdout.splitlines():
+        line = raw_line.strip()
+        if not line.startswith(prefix):
+            continue
+        parts = line[len(prefix):].split("\t", 3)
+        video_id = parts[0].strip() if parts else ""
+        if not video_id:
+            continue
+        items.setdefault(
+            video_id,
+            {
+                "id": video_id,
+                "extractor": (
+                    parts[1].strip().casefold()
+                    if len(parts) > 1 and parts[1].strip()
+                    else "pornhub"
+                ),
+                "title": parts[2].strip() if len(parts) > 2 else "",
+                "webpage_url": parts[3].strip() if len(parts) > 3 else "",
+            },
+        )
+
+    if not items:
+        raise PornhubDownloadError(
+            "Profil nebo seznam se podařilo otevřít, ale nenašel jsem žádná videa."
+        )
+
+    return list(items.values())
+
+
 def download_url(
     url: str,
     destination: str,
