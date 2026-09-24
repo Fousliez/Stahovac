@@ -40,7 +40,8 @@ class Database:
                     url TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     last_scan_at TEXT,
-                    first_scan_done INTEGER NOT NULL DEFAULT 0
+                    first_scan_done INTEGER NOT NULL DEFAULT 0,
+                    current_at TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS posts (
@@ -65,6 +66,13 @@ class Database:
                     ON posts(profile_id, status);
                 """
             )
+
+            profile_columns = {
+                str(row[1])
+                for row in con.execute("PRAGMA table_info(profiles)").fetchall()
+            }
+            if "current_at" not in profile_columns:
+                con.execute("ALTER TABLE profiles ADD COLUMN current_at TEXT")
 
     @staticmethod
     def now() -> str:
@@ -195,6 +203,26 @@ class Database:
                 WHERE profile_id = ? AND status = 'new'
                 """,
                 (self.now(), profile_id),
+            )
+
+    def set_profile_current(self, profile_id: int) -> None:
+        now = self.now()
+        with self.connect() as con:
+            con.execute(
+                """
+                UPDATE posts
+                SET status = 'known', processed_at = ?
+                WHERE profile_id = ? AND status = 'new'
+                """,
+                (now, profile_id),
+            )
+            con.execute(
+                """
+                UPDATE profiles
+                SET last_scan_at = ?, first_scan_done = 1, current_at = ?
+                WHERE id = ?
+                """,
+                (now, now, profile_id),
             )
 
     def get_setting(self, key: str, default: str = "") -> str:
