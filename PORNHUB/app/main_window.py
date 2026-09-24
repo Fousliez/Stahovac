@@ -728,15 +728,17 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _recovery_video_urls(items: list[dict], existing) -> list[str]:
+        """Vybere odolnou směs referenčních videí napříč historií profilu.
+
+        Pornhub profilové seznamy chodí v pořadí od nejnovějších. Proto vždy
+        držíme úplně nejnovější i úplně nejstarší video, několik kusů z obou
+        konců a zbytek rovnoměrně přes celý profil. Nakonec doplníme starší
+        referenční odkazy z minulé kontroly, pokud se do limitu ještě vejdou.
+        """
         old_values = existing if isinstance(existing, list) else []
         result: list[str] = []
 
-        for value in old_values[:15]:
-            url = str(value or "").strip()
-            if url and url not in result:
-                result.append(url)
-
-        for item in items:
+        def item_url(item: dict) -> str:
             webpage_url = str(item.get("webpage_url") or "").strip()
             video_id = str(item.get("id") or "").strip()
             if "view_video.php" not in webpage_url.casefold() and video_id:
@@ -744,10 +746,38 @@ class MainWindow(QMainWindow):
                     "https://www.pornhub.com/view_video.php?viewkey="
                     + video_id
                 )
-            if webpage_url and webpage_url not in result:
-                result.append(webpage_url)
-            if len(result) >= 30:
-                break
+            return webpage_url
+
+        def add_url(url: str) -> None:
+            value = str(url or "").strip()
+            if value and value not in result and len(result) < 30:
+                result.append(value)
+
+        count = len(items)
+        if count:
+            # Dva hlavní kotvící body. Když přejmenování přežije jen část
+            # historie, chceme mít šanci z obou konců profilu.
+            add_url(item_url(items[0]))          # nejnovější
+            add_url(item_url(items[-1]))         # nejstarší
+
+            # Několik dalších nedávných a několik opravdu starých videí.
+            for index in range(1, min(5, count)):
+                add_url(item_url(items[index]))
+            for offset in range(2, min(6, count + 1)):
+                add_url(item_url(items[-offset]))
+
+            # Další body rozprostřeme rovnoměrně napříč celým profilem.
+            # Díky tomu nejsou všechny zálohy ze stejného období.
+            spread_points = min(12, count)
+            if spread_points > 1:
+                for step in range(spread_points):
+                    index = round(step * (count - 1) / (spread_points - 1))
+                    add_url(item_url(items[index]))
+
+        # Starší uložené reference necháme jako poslední pojistku. Mohou
+        # obsahovat videa, která už v aktuálním seznamu profilu nejsou.
+        for value in old_values:
+            add_url(value)
 
         return result[:30]
 
