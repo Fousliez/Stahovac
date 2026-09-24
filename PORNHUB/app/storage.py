@@ -11,8 +11,15 @@ class Storage:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.jobs_file = self.data_dir / "jobs.json"
+        self.categories_file = self.data_dir / "categories.json"
         self.settings_file = self.data_dir / "settings.json"
         self.archive_file = self.data_dir / "download_archive.txt"
+
+        if not self.categories_file.exists():
+            self._write_json(
+                self.categories_file,
+                ["Ruined", "Femdom", "Latex"],
+            )
 
         self._marker_lock = threading.RLock()
         self.remove_setting("quality")
@@ -42,6 +49,58 @@ class Storage:
     def save_jobs(self, jobs: list[dict]) -> None:
         self._write_json(self.jobs_file, jobs)
 
+    def categories(self) -> list[str]:
+        raw = self._read_json(self.categories_file, [])
+        values: list[str] = []
+        if isinstance(raw, list):
+            for value in raw:
+                name = str(value or "").strip()
+                if name and name.casefold() not in {item.casefold() for item in values}:
+                    values.append(name)
+
+        # Kategorie z existujících záznamů zachováme i po případné ruční
+        # úpravě categories.json.
+        for job in self.jobs():
+            name = str(job.get("category") or "").strip()
+            if name and name.casefold() not in {item.casefold() for item in values}:
+                values.append(name)
+
+        return values
+
+    def add_category(self, name: str) -> str:
+        value = str(name or "").strip()
+        if not value:
+            return ""
+
+        categories = self.categories()
+        for existing in categories:
+            if existing.casefold() == value.casefold():
+                return existing
+
+        categories.append(value)
+        self._write_json(self.categories_file, categories)
+        return value
+
+    def set_category(self, urls: list[str], category: str) -> None:
+        wanted = {str(url or "").strip() for url in urls if str(url or "").strip()}
+        if not wanted:
+            return
+
+        value = str(category or "").strip()
+        if value:
+            value = self.add_category(value)
+
+        jobs = self.jobs()
+        changed = False
+        for job in jobs:
+            if str(job.get("url", "")).strip() in wanted:
+                if str(job.get("category") or "").strip() != value:
+                    job["category"] = value
+                    changed = True
+
+        if changed:
+            self.save_jobs(jobs)
+
     def add_urls(self, urls: list[str]) -> int:
         jobs = self.jobs()
         known = {str(job.get("url", "")).strip() for job in jobs}
@@ -62,6 +121,7 @@ class Storage:
                 "ph_profile_path": "",
                 "recovery_videos": [],
                 "previous_urls": [],
+                "category": "",
             })
             known.add(value)
             added += 1
