@@ -68,6 +68,18 @@ class Storage:
             [job for job in self.jobs() if str(job.get("url", "")) not in wanted]
         )
 
+        if not wanted:
+            return
+        db_path = self.marker_database()
+        self._ensure_marker_schema(db_path)
+        placeholders = ",".join("?" for _ in wanted)
+        with self._marker_lock, sqlite3.connect(db_path, timeout=30) as connection:
+            connection.execute(
+                f"DELETE FROM source_items WHERE source_url IN ({placeholders})",
+                list(wanted),
+            )
+            connection.commit()
+
     def update_job(self, url: str, **changes) -> None:
         jobs = self.jobs()
         for job in jobs:
@@ -85,6 +97,7 @@ class Storage:
     def set_setting(self, key: str, value: str) -> None:
         old_rows = self._read_database_rows(self.marker_database()) if key == "marker_dir" else []
         old_known_rows = self._read_known_rows(self.marker_database()) if key == "marker_dir" else []
+        old_scan_rows = self._read_scan_rows(self.marker_database()) if key == "marker_dir" else []
 
         data = self._read_json(self.settings_file, {})
         if not isinstance(data, dict):
@@ -97,6 +110,7 @@ class Storage:
             self._ensure_marker_schema(new_db)
             self._insert_download_rows(new_db, old_rows)
             self._insert_known_rows(new_db, old_known_rows)
+            self._insert_scan_rows(new_db, old_scan_rows)
 
     def remove_setting(self, key: str) -> None:
         data = self._read_json(self.settings_file, {})
@@ -163,6 +177,145 @@ class Storage:
                 connection.commit()
 
         self._ensure_archive_entry(str(extractor).strip(), marker_id)
+
+    def save_scan(self, source_url: str, items: list[dict]) -> None:
+        source = str(source_url or "").strip()
+        if not source:
+            return
+
+        rows: list[tuple[str, str, str, str, str]] = []
+        for item in items:
+            video_id = str(item.get("id", "")).strip()
+            if not video_id:
+                continue
+            rows.append(
+                (
+                    source,
+                    video_id,
+                    str(item.get("extractor", "") or "pornhub").strip().casefold(),
+                    str(item.get("title", "")).strip(),
+                    str(item.get("webpage_url", "")).strip(),
+                )
+            )
+
+        db_path = self.marker_database()
+        self._ensure_marker_schema(db_path)
+        with self._marker_lock, sqlite3.connect(db_path, timeout=30) as connection:
+            connection.execute(
+                "DELETE FROM source_items WHERE source_url = ?",
+                (source,),
+            )
+            if rows:
+                connection.executemany(
+                    """
+                    INSERT INTO source_items(
+                        source_url, id, extractor, title, webpage_url
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+            connection.commit()
+
+    def source_items(self, source_url: str) -> list[dict]:
+        source = str(source_url or "").strip()
+        if not source:
+            return []
+
+        db_path = self.marker_database()
+        self._ensure_marker_schema(db_path)
+        with self._marker_lock, sqlite3.connect(db_path, timeout=30) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, extractor, title, webpage_url
+                FROM source_items
+                WHERE source_url = ?
+                ORDER BY rowid
+                """,
+                (source,),
+            ).fetchall()
+
+        return [
+            {
+                "id": str(row[0] or ""),
+                "extractor": str(row[1] or ""),
+                "title": str(row[2] or ""),
+                "webpage_url": str(row[3] or ""),
+            }
+            for row in rows
+        ]
+
+    def scan_counts(self, source_url: str) -> tuple[int, int, int]:
+        source = str(source_url or "").strip()
+        if not source:
+            return 0, 0, 0
+
+        db_path = self.marker_database()
+        self._ensure_marker_schema(db_path)
+        with self._marker_lock, sqlite3.connect(db_path, timeout=30) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_count,
+                    SUM(
+                        CASE WHEN d.id IS NOT NULL THEN 1 ELSE 0 END
+                    ) AS downloaded_count,
+                    SUM(
+                        CASE
+                            WHEN d.id IS NULL AND k.id IS NULL THEN 1
+                            ELSE 0
+                        END
+                    ) AS new_count
+                FROM source_items s
+                LEFT JOIN downloads d
+                    ON d.id = s.id
+                LEFT JOIN known_items k
+                    ON k.source_url = s.source_url AND k.id = s.id
+                WHERE s.source_url = ?
+                """,
+                (source,),
+            ).fetchone()
+
+        if row is None:
+            return 0, 0, 0
+        return (
+            int(row[0] or 0),
+            int(row[1] or 0),
+            int(row[2] or 0),
+        )
+
+    def new_items(self, source_url: str) -> list[dict]:
+        source = str(source_url or "").strip()
+        if not source:
+            return []
+
+        db_path = self.marker_database()
+        self._ensure_marker_schema(db_path)
+        with self._marker_lock, sqlite3.connect(db_path, timeout=30) as connection:
+            rows = connection.execute(
+                """
+                SELECT s.id, s.extractor, s.title, s.webpage_url
+                FROM source_items s
+                LEFT JOIN downloads d
+                    ON d.id = s.id
+                LEFT JOIN known_items k
+                    ON k.source_url = s.source_url AND k.id = s.id
+                WHERE s.source_url = ?
+                  AND d.id IS NULL
+                  AND k.id IS NULL
+                ORDER BY s.rowid
+                """,
+                (source,),
+            ).fetchall()
+
+        return [
+            {
+                "id": str(row[0] or ""),
+                "extractor": str(row[1] or ""),
+                "title": str(row[2] or ""),
+                "webpage_url": str(row[3] or ""),
+            }
+            for row in rows
+        ]
 
     def mark_known_items(self, source_url: str, items: list[dict]) -> int:
         source = str(source_url or "").strip()
@@ -265,6 +418,20 @@ class Storage:
                     PRIMARY KEY(source_url, id)
                 );
 
+                CREATE TABLE IF NOT EXISTS source_items (
+                    source_url TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    extractor TEXT,
+                    title TEXT,
+                    webpage_url TEXT,
+                    seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(source_url, id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_source_items_source_url
+                    ON source_items(source_url);
+                CREATE INDEX IF NOT EXISTS idx_source_items_id
+                    ON source_items(id);
                 CREATE INDEX IF NOT EXISTS idx_known_items_source_url
                     ON known_items(source_url);
                 CREATE INDEX IF NOT EXISTS idx_known_items_id
@@ -293,6 +460,36 @@ class Storage:
                 ).fetchall()
         except sqlite3.Error:
             return []
+
+    @staticmethod
+    def _read_scan_rows(path: Path) -> list[tuple]:
+        if not path.exists():
+            return []
+        try:
+            with sqlite3.connect(path, timeout=30) as connection:
+                return connection.execute(
+                    """
+                    SELECT source_url, id, extractor, title, webpage_url, seen_at
+                    FROM source_items
+                    """
+                ).fetchall()
+        except sqlite3.Error:
+            return []
+
+    def _insert_scan_rows(self, path: Path, rows: list[tuple]) -> None:
+        if not rows:
+            return
+        self._ensure_marker_schema(path)
+        with sqlite3.connect(path, timeout=30) as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO source_items(
+                    source_url, id, extractor, title, webpage_url, seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            connection.commit()
 
     @staticmethod
     def _read_known_rows(path: Path) -> list[tuple]:
