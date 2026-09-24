@@ -365,6 +365,7 @@ class MainWindow(QMainWindow):
         self.download_worker: DownloadWorker | None = None
         self.scan_thread: QThread | None = None
         self.scan_worker: ScanSourcesWorker | None = None
+        self._scan_errors: list[tuple[str, str]] = []
         self.baseline_thread: QThread | None = None
         self.baseline_worker: BaselineScanWorker | None = None
         self.baseline_url = ""
@@ -670,6 +671,40 @@ class MainWindow(QMainWindow):
         return "Nezjištěno"
 
 
+    def show_error_dialog(
+        self,
+        title: str,
+        summary: str,
+        details: str,
+    ):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(title)
+        box.setText(summary)
+        box.setInformativeText(
+            "Technický výpis je dostupný přes „Zobrazit podrobnosti“."
+        )
+        box.setDetailedText(str(details or "Žádné další podrobnosti."))
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
+
+    def show_last_error(self, url: str):
+        job = self.storage.job(url) or {}
+        details = str(job.get("last_error") or "").strip()
+        if not details:
+            QMessageBox.information(
+                self,
+                "Podrobnosti chyby",
+                "U tohoto odkazu není uložená žádná poslední chyba.",
+            )
+            return
+
+        self.show_error_dialog(
+            "Podrobnosti chyby",
+            f"Poslední chyba pro {self.source_label(url)}.",
+            details,
+        )
+
     def show_job_context_menu(self, position):
         item = self.table.itemAt(position)
         if item is None:
@@ -682,6 +717,10 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         open_action = menu.addAction("Otevřít odkaz")
+        error_action = menu.addAction("Podrobnosti chyby…")
+        job = self.storage.job(url) or {}
+        error_action.setEnabled(bool(str(job.get("last_error") or "").strip()))
+        menu.addSeparator()
         current_action = menu.addAction("Nastavit jako aktuální…")
         current_action.setEnabled(
             bool(url)
@@ -701,6 +740,8 @@ class MainWindow(QMainWindow):
 
         if chosen == open_action:
             QDesktopServices.openUrl(QUrl(url))
+        elif chosen == error_action:
+            self.show_last_error(url)
         elif chosen == current_action:
             self.set_source_current(url)
         elif chosen == delete_action:
@@ -753,6 +794,7 @@ class MainWindow(QMainWindow):
             status="Aktuální",
             progress=0,
             last_run=now,
+            last_error="",
         )
         self.refresh_jobs()
         self.statusBar().showMessage(
@@ -763,7 +805,19 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _baseline_failed(self, message: str):
-        QMessageBox.warning(self, "Nastavit jako aktuální", message)
+        url = self.baseline_url
+        if url:
+            self.storage.update_job(
+                url,
+                status="Chyba",
+                progress=0,
+                last_error=message,
+            )
+        self.show_error_dialog(
+            "Nastavit jako aktuální",
+            "Výchozí stav se nepodařilo vytvořit.",
+            message,
+        )
         self.statusBar().showMessage("Výchozí stav se nepodařilo vytvořit.", 5000)
 
     @Slot()
@@ -869,6 +923,7 @@ class MainWindow(QMainWindow):
 
         self.scan_thread = thread
         self.scan_worker = worker
+        self._scan_errors = []
         self.set_busy(True)
         self.progress.setRange(0, max(1, len(urls)))
         self.progress.setValue(0)
@@ -908,6 +963,7 @@ class MainWindow(QMainWindow):
             status=status,
             progress=0,
             last_run=now,
+            last_error="",
         )
         self.progress.setValue(index)
         self.download_info_label.setText(
@@ -924,7 +980,13 @@ class MainWindow(QMainWindow):
         index: int,
         total: int,
     ):
-        self.storage.update_job(url, status="Chyba", progress=0)
+        self.storage.update_job(
+            url,
+            status="Chyba",
+            progress=0,
+            last_error=message,
+        )
+        self._scan_errors.append((url, message))
         self.progress.setValue(index)
         self.refresh_jobs()
         self.statusBar().showMessage(
@@ -934,12 +996,29 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _scan_cleanup(self):
+        errors = list(self._scan_errors)
         self.scan_thread = None
         self.scan_worker = None
+        self._scan_errors = []
         self.set_busy(False)
         self.progress.hide()
         self.download_info_label.hide()
         self.refresh_jobs()
+
+        if errors:
+            details = "\n\n".join(
+                f"{self.source_label(url)}\n{url}\n{message}"
+                for url, message in errors
+            )
+            self.show_error_dialog(
+                "Kontrola dokončena s chybou",
+                (
+                    "Kontrola se nepodařila u jednoho odkazu."
+                    if len(errors) == 1
+                    else f"Kontrola se nepodařila u {len(errors)} odkazů."
+                ),
+                details,
+            )
 
     def download_new(self):
         if (
@@ -1063,6 +1142,8 @@ class MainWindow(QMainWindow):
         self.download_thread = thread
         self.download_worker = worker
         self._current_urls = list(urls)
+        for url in urls:
+            self.storage.update_job(url, last_error="")
         self.set_busy(True)
         self.progress.setValue(0)
         self.progress.show()
@@ -1150,9 +1231,15 @@ class MainWindow(QMainWindow):
                     ),
                     "progress": 100,
                 }
+            changes["last_error"] = ""
             self.storage.update_job(url, **changes)
         else:
-            self.storage.update_job(url, status="Chyba", progress=0)
+            self.storage.update_job(
+                url,
+                status="Chyba",
+                progress=0,
+                last_error=message,
+            )
             if message:
                 self.statusBar().showMessage(message, 8000)
         self.refresh_jobs()
@@ -1160,7 +1247,19 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _download_failed(self, message: str):
         self.download_info_label.setText("Stahování se nepodařilo spustit.")
-        QMessageBox.warning(self, "Stahování", message)
+        for url in self._current_urls:
+            self.storage.update_job(
+                url,
+                status="Chyba",
+                progress=0,
+                last_error=message,
+            )
+        self.refresh_jobs()
+        self.show_error_dialog(
+            "Stahování",
+            "Stahování se nepodařilo spustit.",
+            message,
+        )
 
     @Slot(int, int)
     def _download_finished(self, ok_count: int, error_count: int):
@@ -1170,10 +1269,19 @@ class MainWindow(QMainWindow):
             f"Hotovo: {ok_count}/{total} • Chyby: {error_count}"
         )
         if error_count:
-            QMessageBox.warning(
-                self,
-                "Stahování dokončeno",
-                f"Hotovo: {ok_count}\nChyby: {error_count}\n\nPodrobnost poslední chyby je ve stavovém řádku.",
+            error_blocks: list[str] = []
+            for url in self._current_urls:
+                job = self.storage.job(url) or {}
+                message = str(job.get("last_error") or "").strip()
+                if message:
+                    error_blocks.append(
+                        f"{self.source_label(url)}\n{url}\n{message}"
+                    )
+            self.show_error_dialog(
+                "Stahování dokončeno s chybou",
+                f"Hotovo: {ok_count} • Chyby: {error_count}",
+                "\n\n".join(error_blocks)
+                or "Podrobnosti chyby nejsou k dispozici.",
             )
         else:
             self.statusBar().showMessage(f"Stahování hotovo. Položek: {ok_count}", 5000)
