@@ -210,11 +210,7 @@ def scan_url_items(
             video_id,
             {
                 "id": video_id,
-                "extractor": (
-                    parts[1].strip().casefold()
-                    if len(parts) > 1 and parts[1].strip()
-                    else "pornhub"
-                ),
+                "extractor": "pornhub",
                 "title": parts[2].strip() if len(parts) > 2 else "",
                 "webpage_url": parts[3].strip() if len(parts) > 3 else "",
             },
