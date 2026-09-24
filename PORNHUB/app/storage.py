@@ -156,6 +156,10 @@ class Storage:
                         str(source_url).strip(),
                     ),
                 )
+                connection.execute(
+                    "DELETE FROM known_items WHERE id = ?",
+                    (marker_id,),
+                )
                 connection.commit()
 
         self._ensure_archive_entry(str(extractor).strip(), marker_id)
@@ -344,6 +348,11 @@ class Storage:
 
         db_path = self.marker_database()
         self._ensure_marker_schema(db_path)
+        known_ids = {
+            str(row[1]).strip()
+            for row in self._read_known_rows(db_path)
+            if len(row) > 1 and str(row[1]).strip()
+        }
         rows: list[tuple[str, str]] = []
         for line in lines:
             value = line.strip()
@@ -354,7 +363,7 @@ class Storage:
                 extractor, video_id = parts
             else:
                 extractor, video_id = "", parts[0]
-            if video_id:
+            if video_id and video_id not in known_ids:
                 rows.append((video_id, extractor))
 
         if not rows:
