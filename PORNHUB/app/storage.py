@@ -56,6 +56,7 @@ class Storage:
                 "status": "Připraveno",
                 "progress": 0,
                 "last_run": "",
+                "last_error": "",
             })
             known.add(value)
             added += 1
@@ -87,6 +88,13 @@ class Storage:
                 job.update(changes)
                 break
         self.save_jobs(jobs)
+
+    def job(self, url: str) -> dict | None:
+        wanted = str(url or "").strip()
+        for job in self.jobs():
+            if str(job.get("url", "")).strip() == wanted:
+                return job
+        return None
 
     def get_setting(self, key: str, default: str = "") -> str:
         data = self._read_json(self.settings_file, {})
