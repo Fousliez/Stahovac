@@ -30,7 +30,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .downloader import download_url, resolve_reference_cutoff, scan_url_items
+from .downloader import (
+    download_url,
+    resolve_reference_cutoff,
+    scan_source_with_identity,
+)
 from .storage import Storage
 from .version import APPLICATION_NAME, BUILD_VERSION
 
@@ -136,14 +140,20 @@ class DownloadWorker(QObject):
 
 class ScanSourcesWorker(QObject):
     source_started = Signal(str, int, int)
-    source_finished = Signal(str, list, int, int)
+    source_finished = Signal(str, list, dict, int, int)
     source_failed = Signal(str, str, int, int)
     finished = Signal()
 
-    def __init__(self, urls: list[str], cookies_file: str):
+    def __init__(
+        self,
+        urls: list[str],
+        cookies_file: str,
+        source_meta: dict[str, dict],
+    ):
         super().__init__()
         self.urls = urls
         self.cookies_file = cookies_file
+        self.source_meta = source_meta
 
     @Slot()
     def run(self):
@@ -151,27 +161,37 @@ class ScanSourcesWorker(QObject):
         for index, url in enumerate(self.urls, start=1):
             self.source_started.emit(url, index, total)
             try:
-                items = scan_url_items(url, self.cookies_file)
+                items, identity = scan_source_with_identity(
+                    url,
+                    self.cookies_file,
+                    self.source_meta.get(url, {}),
+                )
             except Exception as exc:
                 self.source_failed.emit(url, str(exc), index, total)
             else:
-                self.source_finished.emit(url, items, index, total)
+                self.source_finished.emit(url, items, identity, index, total)
         self.finished.emit()
 
 
 class BaselineScanWorker(QObject):
-    finished = Signal(list)
+    finished = Signal(list, dict)
     failed = Signal(str)
 
-    def __init__(self, url: str, cookies_file: str):
+    def __init__(self, url: str, cookies_file: str, source_meta: dict):
         super().__init__()
         self.url = url
         self.cookies_file = cookies_file
+        self.source_meta = source_meta
 
     @Slot()
     def run(self):
         try:
-            self.finished.emit(scan_url_items(self.url, self.cookies_file))
+            items, identity = scan_source_with_identity(
+                self.url,
+                self.cookies_file,
+                self.source_meta,
+            )
+            self.finished.emit(items, identity)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -366,6 +386,7 @@ class MainWindow(QMainWindow):
         self.scan_thread: QThread | None = None
         self.scan_worker: ScanSourcesWorker | None = None
         self._scan_errors: list[tuple[str, str]] = []
+        self._scan_renames: list[dict] = []
         self.baseline_thread: QThread | None = None
         self.baseline_worker: BaselineScanWorker | None = None
         self.baseline_url = ""
@@ -705,6 +726,117 @@ class MainWindow(QMainWindow):
             details,
         )
 
+    @staticmethod
+    def _recovery_video_urls(items: list[dict], existing) -> list[str]:
+        old_values = existing if isinstance(existing, list) else []
+        result: list[str] = []
+
+        for value in old_values[:15]:
+            url = str(value or "").strip()
+            if url and url not in result:
+                result.append(url)
+
+        for item in items:
+            webpage_url = str(item.get("webpage_url") or "").strip()
+            video_id = str(item.get("id") or "").strip()
+            if "view_video.php" not in webpage_url.casefold() and video_id:
+                webpage_url = (
+                    "https://www.pornhub.com/view_video.php?viewkey="
+                    + video_id
+                )
+            if webpage_url and webpage_url not in result:
+                result.append(webpage_url)
+            if len(result) >= 30:
+                break
+
+        return result[:30]
+
+    def _apply_profile_scan_result(
+        self,
+        url: str,
+        items: list[dict],
+        identity: dict,
+    ) -> tuple[str, dict | None]:
+        old_job = self.storage.job(url) or {}
+        effective_url = url
+        rename_info: dict | None = None
+
+        if bool(identity.get("renamed")):
+            new_url = str(identity.get("new_url") or "").strip()
+            if new_url and new_url != url:
+                old_name = str(
+                    old_job.get("ph_profile_name")
+                    or old_job.get("title")
+                    or self.source_label(url)
+                ).strip()
+                self.storage.replace_source_url(url, new_url)
+                effective_url = new_url
+                rename_info = {
+                    "old_url": url,
+                    "new_url": new_url,
+                    "old_name": old_name,
+                    "new_name": str(
+                        identity.get("profile_name")
+                        or self.source_label(new_url)
+                    ).strip(),
+                }
+
+        current_job = self.storage.job(effective_url) or old_job
+        recovery_videos = self._recovery_video_urls(
+            items,
+            current_job.get("recovery_videos"),
+        )
+
+        changes = {
+            "recovery_videos": recovery_videos,
+        }
+        user_id = str(identity.get("user_id") or "").strip()
+        profile_name = str(identity.get("profile_name") or "").strip()
+        profile_path = str(identity.get("profile_path") or "").strip()
+
+        if user_id:
+            changes["ph_user_id"] = user_id
+        if profile_name:
+            changes["ph_profile_name"] = profile_name
+            changes["title"] = profile_name
+        if profile_path:
+            changes["ph_profile_path"] = profile_path
+
+        self.storage.update_job(effective_url, **changes)
+        return effective_url, rename_info
+
+    def _show_profile_renames(self, renames: list[dict]):
+        if not renames:
+            return
+
+        blocks = []
+        for change in renames:
+            old_name = str(change.get("old_name") or "Původní profil")
+            new_name = str(change.get("new_name") or "Nový profil")
+            old_url = str(change.get("old_url") or "")
+            new_url = str(change.get("new_url") or "")
+            blocks.append(
+                f"{old_name} → {new_name}\n"
+                f"{old_url}\n→ {new_url}"
+            )
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Pornhub profil byl přejmenován")
+        if len(renames) == 1:
+            box.setText(
+                "Pornhub profil změnil jméno nebo adresu. "
+                "Stahovač ověřil stejné interní ID účtu a odkaz automaticky opravil."
+            )
+        else:
+            box.setText(
+                f"Pornhub změnil {len(renames)} profilů. "
+                "Stahovač ověřil jejich interní ID účtů a odkazy automaticky opravil."
+            )
+        box.setInformativeText("\n\n".join(blocks))
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
+
     def show_job_context_menu(self, position):
         item = self.table.itemAt(position)
         if item is None:
@@ -763,7 +895,11 @@ class MainWindow(QMainWindow):
 
         cookies_file = self.storage.get_setting("cookies_file", "")
         thread = QThread(self)
-        worker = BaselineScanWorker(url, cookies_file)
+        worker = BaselineScanWorker(
+            url,
+            cookies_file,
+            self.storage.job(url) or {},
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._baseline_finished)
@@ -783,14 +919,25 @@ class MainWindow(QMainWindow):
         )
         thread.start()
 
-    @Slot(list)
-    def _baseline_finished(self, items: list):
+    @Slot(list, dict)
+    def _baseline_finished(self, items: list, identity: dict):
         url = self.baseline_url
-        self.storage.save_scan(url, items)
-        added = self.storage.mark_known_items(url, items)
+        try:
+            effective_url, rename_info = self._apply_profile_scan_result(
+                url,
+                items,
+                identity,
+            )
+        except Exception as exc:
+            self._baseline_failed(str(exc))
+            return
+
+        self.baseline_url = effective_url
+        self.storage.save_scan(effective_url, items)
+        added = self.storage.mark_known_items(effective_url, items)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.storage.update_job(
-            url,
+            effective_url,
             status="Aktuální",
             progress=0,
             last_run=now,
@@ -802,6 +949,8 @@ class MainWindow(QMainWindow):
             f"{added} nově uloženo jako známých. Nic se nestahovalo.",
             7000,
         )
+        if rename_info:
+            self._show_profile_renames([rename_info])
 
     @Slot(str)
     def _baseline_failed(self, message: str):
@@ -910,7 +1059,11 @@ class MainWindow(QMainWindow):
 
         cookies_file = self.storage.get_setting("cookies_file", "")
         thread = QThread(self)
-        worker = ScanSourcesWorker(urls, cookies_file)
+        source_meta = {
+            url: (self.storage.job(url) or {})
+            for url in urls
+        }
+        worker = ScanSourcesWorker(urls, cookies_file, source_meta)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.source_started.connect(self._scan_source_started)
@@ -924,6 +1077,7 @@ class MainWindow(QMainWindow):
         self.scan_thread = thread
         self.scan_worker = worker
         self._scan_errors = []
+        self._scan_renames = []
         self.set_busy(True)
         self.progress.setRange(0, max(1, len(urls)))
         self.progress.setValue(0)
@@ -945,21 +1099,44 @@ class MainWindow(QMainWindow):
         self.storage.update_job(url, status="Kontroluji…", progress=0)
         self.refresh_jobs()
 
-    @Slot(str, list, int, int)
+    @Slot(str, list, dict, int, int)
     def _scan_source_finished(
         self,
         url: str,
         items: list,
+        identity: dict,
         index: int,
         total: int,
     ):
-        self.storage.save_scan(url, items)
-        total_count, downloaded_count, new_count = self.storage.scan_counts(url)
+        try:
+            effective_url, rename_info = self._apply_profile_scan_result(
+                url,
+                items,
+                identity,
+            )
+        except Exception as exc:
+            self._scan_source_failed(url, str(exc), index, total)
+            return
+
+        if rename_info:
+            self._scan_renames.append(rename_info)
+
+        self.storage.save_scan(effective_url, items)
+        total_count, downloaded_count, new_count = self.storage.scan_counts(
+            effective_url
+        )
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         status = f"{new_count} nových" if new_count else "Aktuální"
+
+        current_job = self.storage.job(effective_url) or {}
+        display_title = str(
+            current_job.get("ph_profile_name")
+            or current_job.get("title")
+            or self.source_label(effective_url)
+        )
         self.storage.update_job(
-            url,
-            title=self.source_label(url),
+            effective_url,
+            title=display_title,
             status=status,
             progress=0,
             last_run=now,
@@ -997,9 +1174,11 @@ class MainWindow(QMainWindow):
     @Slot()
     def _scan_cleanup(self):
         errors = list(self._scan_errors)
+        renames = list(self._scan_renames)
         self.scan_thread = None
         self.scan_worker = None
         self._scan_errors = []
+        self._scan_renames = []
         self.set_busy(False)
         self.progress.hide()
         self.download_info_label.hide()
@@ -1019,6 +1198,9 @@ class MainWindow(QMainWindow):
                 ),
                 details,
             )
+
+        if renames:
+            self._show_profile_renames(renames)
 
     def download_new(self):
         if (
