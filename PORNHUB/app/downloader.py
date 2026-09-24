@@ -14,6 +14,16 @@ class PornhubDownloadError(RuntimeError):
 
 
 BEST_FORMAT = "best[protocol=https][ext=mp4]/best"
+NETWORK_ARGS = [
+    "--socket-timeout",
+    "60",
+    "--retries",
+    "5",
+    "--extractor-retries",
+    "5",
+    "--retry-sleep",
+    "2",
+]
 
 _PROGRESS_RE = re.compile(r"__STAHOVAC_PROGRESS__\s*([0-9]+(?:\.[0-9]+)?)%")
 _ITEM_PREFIX = "__STAHOVAC_ITEM__"
@@ -34,6 +44,7 @@ def resolve_reference_cutoff(
         "-m",
         "yt_dlp",
         "--no-config",
+        *NETWORK_ARGS,
         "--skip-download",
         "--no-playlist",
         "--impersonate",
@@ -109,11 +120,12 @@ def scan_url_items(
         return []
 
     prefix = "__STAHOVAC_SCAN__"
-    cmd = [
+    base_cmd = [
         sys.executable,
         "-m",
         "yt_dlp",
         "--no-config",
+        *NETWORK_ARGS,
         "--skip-download",
         "--flat-playlist",
         "--impersonate",
@@ -124,30 +136,66 @@ def scan_url_items(
         f"{prefix}%(id)s\t%(extractor_key|pornhub)s\t%(title|)s\t%(webpage_url|)s",
     ]
     if cookies_file.strip():
-        cmd.extend(["--cookies", str(Path(cookies_file).expanduser())])
-    cmd.append(source)
+        base_cmd.extend(["--cookies", str(Path(cookies_file).expanduser())])
+    base_cmd.append(source)
 
-    try:
-        process = subprocess.run(
-            cmd,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=1800,
-            errors="replace",
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise PornhubDownloadError(
-            f"Profil nebo seznam se nepodařilo projít: {exc}"
-        ) from exc
+    process = None
+    last_message = ""
+    for attempt in range(2):
+        cmd = list(base_cmd)
+        if attempt == 1:
+            # Druhý pokus dostane ještě delší timeout. Pornhub bývá občas
+            # línější než web státní správy, ale není důvod kvůli tomu vzdát scan.
+            timeout_index = cmd.index("--socket-timeout") + 1
+            cmd[timeout_index] = "90"
 
-    if process.returncode != 0:
-        message = (
+        try:
+            process = subprocess.run(
+                cmd,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=1800,
+                errors="replace",
+            )
+        except subprocess.TimeoutExpired:
+            last_message = "Celá kontrola překročila časový limit."
+            continue
+        except OSError as exc:
+            raise PornhubDownloadError(
+                f"Pornhub kontrolu se nepodařilo spustit: {exc}"
+            ) from exc
+
+        if process.returncode == 0:
+            break
+
+        last_message = (
             process.stderr.strip()
             or process.stdout.strip()
             or "Profil nebo seznam se nepodařilo projít."
         )
-        raise PornhubDownloadError(message)
+        is_timeout = (
+            "timed out" in last_message.casefold()
+            or "timeout" in last_message.casefold()
+            or "curl: (28)" in last_message.casefold()
+        )
+        if not is_timeout:
+            break
+
+    if process is None or process.returncode != 0:
+        lowered = last_message.casefold()
+        if (
+            "timed out" in lowered
+            or "timeout" in lowered
+            or "curl: (28)" in lowered
+        ):
+            raise PornhubDownloadError(
+                "Pornhub neodpověděl ani po opakovaném pokusu. "
+                "Kontrola nic nezměnila. Zkus akci znovu za chvíli."
+            )
+        raise PornhubDownloadError(
+            last_message or "Profil nebo seznam se nepodařilo projít."
+        )
 
     items: dict[str, dict] = {}
     for raw_line in process.stdout.splitlines():
@@ -206,6 +254,7 @@ def download_url(
         "-m",
         "yt_dlp",
         "--no-config",
+        *NETWORK_ARGS,
         "--newline",
         "--progress",
         "--impersonate",
