@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -115,6 +118,7 @@ class DownloadWorker(QObject):
         archive_file: str,
         cookies_file: str,
         reference_url: str,
+        download_items_by_url: dict[str, list[dict]] | None = None,
     ):
         super().__init__()
         self.urls = urls
@@ -122,6 +126,7 @@ class DownloadWorker(QObject):
         self.archive_file = archive_file
         self.cookies_file = cookies_file
         self.reference_url = reference_url
+        self.download_items_by_url = download_items_by_url or {}
         self.control = DownloadControl()
 
     def pause(self) -> bool:
@@ -133,24 +138,204 @@ class DownloadWorker(QObject):
     def cancel(self) -> bool:
         return self.control.cancel()
 
+    @staticmethod
+    def _direct_video_url(item: dict) -> str:
+        webpage_url = str(item.get("webpage_url") or "").strip()
+        if "view_video.php" in webpage_url.casefold():
+            return webpage_url
+        video_id = str(item.get("id") or "").strip()
+        if not video_id:
+            return ""
+        return f"https://www.pornhub.com/view_video.php?viewkey={video_id}"
+
+    @staticmethod
+    def _speed_bytes(speed: str) -> float:
+        match = re.match(
+            r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B)/s\s*$",
+            str(speed or ""),
+            re.I,
+        )
+        if not match:
+            return 0.0
+        value = float(match.group(1))
+        unit = match.group(2).casefold()
+        factors = {
+            "b": 1.0,
+            "kb": 1000.0,
+            "kib": 1024.0,
+            "mb": 1000.0 ** 2,
+            "mib": 1024.0 ** 2,
+            "gb": 1000.0 ** 3,
+            "gib": 1024.0 ** 3,
+            "tb": 1000.0 ** 4,
+            "tib": 1024.0 ** 4,
+        }
+        return value * factors.get(unit, 0.0)
+
+    @staticmethod
+    def _format_speed(value: float) -> str:
+        if value <= 0:
+            return ""
+        mib = value / (1024.0 ** 2)
+        if mib >= 1:
+            return f"{mib:.2f} MiB/s"
+        kib = value / 1024.0
+        return f"{kib:.0f} KiB/s"
+
+    def _download_parallel_items(
+        self,
+        source_url: str,
+        source_index: int,
+        source_total: int,
+        items: list[dict],
+    ) -> tuple[int, int, bool]:
+        """Stáhne nejvýše dvě DB-ově nové položky současně."""
+        if not items:
+            self.item_progress.emit(
+                source_url, 100, "Souběžně", "", source_index, source_total, 1, 1
+            )
+            return 0, 0, False
+
+        state_lock = threading.RLock()
+        progresses: dict[int, int] = {}
+        speeds: dict[int, float] = {}
+        completed = 0
+        downloaded = 0
+        failed = 0
+        video_total = len(items)
+
+        def task(position: int, item: dict) -> tuple[bool, str]:
+            nonlocal completed, downloaded
+            direct_url = self._direct_video_url(item)
+            if not direct_url:
+                return False, "Chybí odkaz na video."
+
+            def progress(
+                percent: int,
+                _status: str,
+                _title: str,
+                speed: str,
+                _video_index: int,
+                _video_total: int,
+            ):
+                with state_lock:
+                    progresses[position] = percent
+                    speeds[position] = self._speed_bytes(speed)
+                    overall = int(
+                        sum(progresses.get(i, 0) for i in range(1, video_total + 1))
+                        / video_total
+                    )
+                    active_until = min(video_total, completed + 2)
+                    total_speed = self._format_speed(sum(speeds.values()))
+                self.item_progress.emit(
+                    source_url,
+                    overall,
+                    "Souběžně",
+                    total_speed,
+                    source_index,
+                    source_total,
+                    active_until,
+                    video_total,
+                )
+
+            try:
+                download_url(
+                    direct_url,
+                    self.destination,
+                    self.archive_file,
+                    cookies_file=self.cookies_file,
+                    progress_callback=progress,
+                    completed_callback=self.video_downloaded.emit,
+                    control=self.control,
+                    use_archive=False,
+                    source_url_override=source_url,
+                )
+            except DownloadCancelled:
+                raise
+            except Exception as exc:
+                return False, str(exc)
+
+            with state_lock:
+                progresses[position] = 100
+                speeds[position] = 0.0
+                completed += 1
+                downloaded += 1
+                overall = int(
+                    sum(progresses.get(i, 0) for i in range(1, video_total + 1))
+                    / video_total
+                )
+                active_until = min(video_total, completed + 2)
+                total_speed = self._format_speed(sum(speeds.values()))
+            self.item_progress.emit(
+                source_url,
+                overall,
+                "Souběžně",
+                total_speed,
+                source_index,
+                source_total,
+                active_until,
+                video_total,
+            )
+            return True, ""
+
+        futures = []
+        cancelled = False
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="ph-download") as pool:
+            for position, item in enumerate(items, start=1):
+                if self.control.cancelled:
+                    cancelled = True
+                    break
+                futures.append(pool.submit(task, position, item))
+
+            for future in as_completed(futures):
+                if self.control.cancelled:
+                    cancelled = True
+                    for pending in futures:
+                        pending.cancel()
+                    break
+                try:
+                    success, _message = future.result()
+                except DownloadCancelled:
+                    cancelled = True
+                    for pending in futures:
+                        pending.cancel()
+                    break
+                except Exception:
+                    failed += 1
+                else:
+                    if not success:
+                        failed += 1
+
+        return downloaded, failed, cancelled
+
     @Slot()
     def run(self):
         ok_count = 0
         error_count = 0
         total = len(self.urls)
 
-        try:
-            reference_timestamp, reference_date_after = resolve_reference_cutoff(
-                self.reference_url,
-                self.cookies_file,
-                self.control,
-            )
-        except DownloadCancelled:
-            self.finished.emit(0, 0, True)
-            return
-        except Exception as exc:
-            self.failed.emit(str(exc))
-            return
+        # Referenční datum potřebujeme jen pro starý sekvenční fallback.
+        # Pokud máme položky ze scan databáze, vybíráme novější videa přesně
+        # podle jejich pořadí a můžeme je pustit po dvou.
+        needs_reference_lookup = bool(
+            self.reference_url
+            and any(url not in self.download_items_by_url for url in self.urls)
+        )
+        reference_timestamp = 0
+        reference_date_after = ""
+        if needs_reference_lookup:
+            try:
+                reference_timestamp, reference_date_after = resolve_reference_cutoff(
+                    self.reference_url,
+                    self.cookies_file,
+                    self.control,
+                )
+            except DownloadCancelled:
+                self.finished.emit(0, 0, True)
+                return
+            except Exception as exc:
+                self.failed.emit(str(exc))
+                return
 
         cancelled = False
         for index, url in enumerate(self.urls, start=1):
@@ -158,6 +343,24 @@ class DownloadWorker(QObject):
                 cancelled = True
                 break
             self.item_started.emit(url, index, total)
+
+            if url in self.download_items_by_url:
+                _downloaded, _video_errors, was_cancelled = self._download_parallel_items(
+                    url,
+                    index,
+                    total,
+                    self.download_items_by_url[url],
+                )
+                if was_cancelled:
+                    cancelled = True
+                    self.item_cancelled.emit(url)
+                    break
+
+                # Chyba konkrétního videa není chyba celého profilu. Nehotové
+                # ID zůstane jako "nové" a příště se zkusí znovu.
+                ok_count += 1
+                self.item_finished.emit(url, True, "", "")
+                continue
 
             def progress(
                 percent: int,
