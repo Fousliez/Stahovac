@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
@@ -464,6 +464,9 @@ class MainWindow(QMainWindow):
         self._download_paused = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
+        self._download_reference_url = ""
+        self._downloaded_video_count = 0
+        self._download_skipped_count = 0
 
         self.setWindowTitle(f"{APPLICATION_NAME} {BUILD_VERSION}")
         self.resize(1120, 760)
@@ -1648,6 +1651,9 @@ class MainWindow(QMainWindow):
         self._download_paused = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
+        self._download_reference_url = reference_url
+        self._downloaded_video_count = 0
+        self._download_skipped_count = 0
         for url in urls:
             self.storage.update_job(url, last_error="")
         self.set_busy(True)
@@ -1739,6 +1745,35 @@ class MainWindow(QMainWindow):
             or self.source_label(url)
             or "Neznámý profil"
         ).strip()
+
+    @staticmethod
+    def _video_id_from_url(url: str) -> str:
+        try:
+            parsed = urlparse(str(url or "").strip())
+            return str(parse_qs(parsed.query).get("viewkey", [""])[0]).strip()
+        except (ValueError, TypeError):
+            return ""
+
+    def _mark_reference_and_older_known(self, source_url: str) -> int:
+        """U režimu 'Stáhnout novější' označí referenční a starší obsah jako známý."""
+        reference_id = self._video_id_from_url(self._download_reference_url)
+        if not reference_id:
+            return 0
+
+        items = self.storage.source_items(source_url)
+        reference_index = next(
+            (
+                index
+                for index, item in enumerate(items)
+                if str(item.get("id") or "").strip() == reference_id
+            ),
+            -1,
+        )
+        if reference_index < 0:
+            return 0
+
+        skipped_items = items[reference_index:]
+        return self.storage.mark_known_items(source_url, skipped_items)
 
     @Slot(str, int, int)
     def _item_started(self, url: str, index: int, total: int):
@@ -1838,6 +1873,7 @@ class MainWindow(QMainWindow):
 
     @Slot(dict)
     def _video_downloaded(self, item: dict):
+        self._downloaded_video_count += 1
         self.storage.mark_download(
             str(item.get("id", "")),
             extractor=str(item.get("extractor", "")),
@@ -1856,6 +1892,9 @@ class MainWindow(QMainWindow):
                 if title:
                     changes["title"] = title
             else:
+                if self._download_reference_url:
+                    self._download_skipped_count += self._mark_reference_and_older_known(url)
+
                 _total, _downloaded, new_count = self.storage.scan_counts(url)
                 changes = {
                     "status": (
@@ -1931,11 +1970,35 @@ class MainWindow(QMainWindow):
                 or "Podrobnosti chyby nejsou k dispozici.",
             )
         else:
-            self.statusBar().showMessage(f"Stahování hotovo. Položek: {ok_count}", 5000)
+            remaining_new = 0
+            for url in self._current_urls:
+                if not self.is_single_video_url(url):
+                    _total, _downloaded, new_count = self.storage.scan_counts(url)
+                    remaining_new += new_count
+
+            self.statusBar().showMessage(
+                f"Stahování hotovo. Staženo videí: {self._downloaded_video_count}",
+                5000,
+            )
+
+            lines = [
+                f"Staženo: {self._downloaded_video_count} videí.",
+            ]
+            if self._download_reference_url:
+                lines.append(
+                    f"Přeskočeno jako starší/známé: {self._download_skipped_count} videí."
+                )
+            if remaining_new:
+                lines.append(
+                    f"Ještě zbývá {remaining_new} nových videí, která se nepodařilo dokončit."
+                )
+            else:
+                lines.append("Profil je aktuální.")
+
             QMessageBox.information(
                 self,
                 "Hotovo",
-                "Stahování bylo dokončeno.",
+                "\n".join(lines),
             )
 
     @Slot()
@@ -1947,6 +2010,9 @@ class MainWindow(QMainWindow):
         self._download_paused = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
+        self._download_reference_url = ""
+        self._downloaded_video_count = 0
+        self._download_skipped_count = 0
         self.pause_download_button.setText("Pozastavit")
         self.pause_download_button.setEnabled(False)
         self.cancel_download_button.setEnabled(False)
