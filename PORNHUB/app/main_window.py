@@ -367,6 +367,246 @@ class DownloadWorker(QObject):
 
         return downloaded, failed, cancelled
 
+    def _download_parallel_profile_queue(
+        self,
+        urls: list[str],
+    ) -> tuple[int, int, bool]:
+        """Globální fronta: nejvýše pět videí současně napříč profily."""
+        queued_urls = [
+            url for url in urls
+            if url in self.download_items_by_url
+        ]
+        if not queued_urls:
+            return 0, 0, False
+
+        total_sources = len(self.urls)
+        source_indices = {
+            url: self.urls.index(url) + 1
+            for url in queued_urls
+        }
+
+        flat_tasks: list[tuple[int, str, int, dict]] = []
+        source_remaining: dict[str, int] = {}
+        source_started: set[str] = set()
+        source_completed: set[str] = set()
+        task_number = 0
+
+        for url in queued_urls:
+            items = list(self.download_items_by_url.get(url) or [])
+            source_remaining[url] = len(items)
+            if not items:
+                self.item_started.emit(
+                    url,
+                    source_indices[url],
+                    total_sources,
+                )
+                self.item_finished.emit(url, True, "", "")
+                source_started.add(url)
+                source_completed.add(url)
+                continue
+
+            for item in items:
+                task_number += 1
+                flat_tasks.append(
+                    (
+                        task_number,
+                        url,
+                        source_indices[url],
+                        item,
+                    )
+                )
+
+        total_videos = len(flat_tasks)
+        if not flat_tasks:
+            return len(source_completed), 0, False
+
+        state_lock = threading.RLock()
+        progresses: dict[int, int] = {}
+        speeds: dict[int, float] = {}
+        active_tasks: set[int] = set()
+        completed_videos = 0
+
+        def task(
+            position: int,
+            source_url: str,
+            source_index: int,
+            item: dict,
+        ) -> tuple[bool, str]:
+            nonlocal completed_videos
+
+            direct_url = self._direct_video_url(item)
+            if not direct_url:
+                return False, "Chybí odkaz na video."
+
+            emit_started = False
+            with state_lock:
+                active_tasks.add(position)
+                if source_url not in source_started:
+                    source_started.add(source_url)
+                    emit_started = True
+
+            if emit_started:
+                self.item_started.emit(
+                    source_url,
+                    source_index,
+                    total_sources,
+                )
+
+            def progress(
+                percent: int,
+                _status: str,
+                _title: str,
+                speed: str,
+                _video_index: int,
+                _video_total: int,
+            ):
+                with state_lock:
+                    progresses[position] = percent
+                    speeds[position] = self._speed_bytes(speed)
+                    overall = int(
+                        sum(
+                            progresses.get(i, 0)
+                            for i in range(1, total_videos + 1)
+                        )
+                        / total_videos
+                    )
+                    visible_index = min(
+                        total_videos,
+                        completed_videos + len(active_tasks),
+                    )
+                    total_speed = self._format_speed(sum(speeds.values()))
+
+                self.item_progress.emit(
+                    source_url,
+                    overall,
+                    "Fronta",
+                    total_speed,
+                    source_index,
+                    total_sources,
+                    visible_index,
+                    total_videos,
+                )
+
+            success = False
+            message = ""
+            try:
+                download_url(
+                    direct_url,
+                    self.destination,
+                    self.archive_file,
+                    cookies_file=self.cookies_file,
+                    progress_callback=progress,
+                    completed_callback=self.video_downloaded.emit,
+                    control=self.control,
+                    use_archive=False,
+                    source_url_override=source_url,
+                )
+                success = True
+            except DownloadCancelled:
+                with state_lock:
+                    active_tasks.discard(position)
+                    speeds[position] = 0.0
+                raise
+            except Exception as exc:
+                message = str(exc)
+
+            source_done = False
+            with state_lock:
+                progresses[position] = 100
+                speeds[position] = 0.0
+                active_tasks.discard(position)
+                completed_videos += 1
+                source_remaining[source_url] = max(
+                    0,
+                    source_remaining.get(source_url, 1) - 1,
+                )
+                if (
+                    source_remaining[source_url] == 0
+                    and source_url not in source_completed
+                ):
+                    source_completed.add(source_url)
+                    source_done = True
+
+                overall = int(
+                    sum(
+                        progresses.get(i, 0)
+                        for i in range(1, total_videos + 1)
+                    )
+                    / total_videos
+                )
+                visible_index = min(
+                    total_videos,
+                    completed_videos + len(active_tasks),
+                )
+                total_speed = self._format_speed(sum(speeds.values()))
+
+            self.item_progress.emit(
+                source_url,
+                overall,
+                "Fronta",
+                total_speed,
+                source_index,
+                total_sources,
+                visible_index,
+                total_videos,
+            )
+
+            if source_done:
+                # Stejně jako dosud chyba jednotlivého videa neshodí celý
+                # profil. Neúspěšné ID zůstane nové a příště se zkusí znovu.
+                self.item_finished.emit(source_url, True, "", "")
+
+            return success, message
+
+        futures = []
+        cancelled = False
+        with ThreadPoolExecutor(
+            max_workers=MAX_PARALLEL_DOWNLOADS,
+            thread_name_prefix="ph-profile-queue",
+        ) as pool:
+            for position, source_url, source_index, item in flat_tasks:
+                if self.control.cancelled:
+                    cancelled = True
+                    break
+                futures.append(
+                    pool.submit(
+                        task,
+                        position,
+                        source_url,
+                        source_index,
+                        item,
+                    )
+                )
+
+            for future in as_completed(futures):
+                if self.control.cancelled:
+                    cancelled = True
+                    for pending in futures:
+                        pending.cancel()
+                    break
+                try:
+                    future.result()
+                except DownloadCancelled:
+                    cancelled = True
+                    for pending in futures:
+                        pending.cancel()
+                    break
+                except Exception:
+                    # Jednotlivé video zůstává jako nové pro další pokus.
+                    pass
+
+        if cancelled:
+            with state_lock:
+                unfinished_started = [
+                    url
+                    for url in source_started
+                    if url not in source_completed
+                ]
+            for url in unfinished_started:
+                self.item_cancelled.emit(url)
+
+        return len(source_completed), 0, cancelled
+
     def _download_manual_urls(self) -> tuple[int, int, bool]:
         """Stáhne ručně vložená videa paralelně, nejvýše po pěti."""
         total = len(self.urls)
@@ -522,29 +762,29 @@ class DownloadWorker(QObject):
                 return
 
         cancelled = False
+
+        parallel_urls = [
+            url
+            for url in self.urls
+            if url in self.download_items_by_url
+        ]
+        if parallel_urls:
+            parallel_ok, parallel_errors, was_cancelled = (
+                self._download_parallel_profile_queue(parallel_urls)
+            )
+            ok_count += parallel_ok
+            error_count += parallel_errors
+            if was_cancelled:
+                self.finished.emit(ok_count, error_count, True)
+                return
+
         for index, url in enumerate(self.urls, start=1):
+            if url in self.download_items_by_url:
+                continue
             if self.control.cancelled:
                 cancelled = True
                 break
             self.item_started.emit(url, index, total)
-
-            if url in self.download_items_by_url:
-                _downloaded, _video_errors, was_cancelled = self._download_parallel_items(
-                    url,
-                    index,
-                    total,
-                    self.download_items_by_url[url],
-                )
-                if was_cancelled:
-                    cancelled = True
-                    self.item_cancelled.emit(url)
-                    break
-
-                # Chyba konkrétního videa není chyba celého profilu. Nehotové
-                # ID zůstane jako "nové" a příště se zkusí znovu.
-                ok_count += 1
-                self.item_finished.emit(url, True, "", "")
-                continue
 
             def progress(
                 percent: int,
@@ -998,6 +1238,7 @@ class MainWindow(QMainWindow):
         self.baseline_url = ""
         self._current_urls: list[str] = []
         self._active_download_url = ""
+        self._active_download_urls: set[str] = set()
         self._download_paused = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
@@ -2603,6 +2844,7 @@ class MainWindow(QMainWindow):
         self.download_worker = worker
         self._current_urls = list(urls)
         self._active_download_url = ""
+        self._active_download_urls.clear()
         self._download_paused = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
@@ -2639,9 +2881,9 @@ class MainWindow(QMainWindow):
                 return
             self._download_paused = False
             self.pause_download_button.setText("Pozastavit")
-            if self._active_download_url:
+            for active_url in list(self._active_download_urls):
                 self.storage.update_job(
-                    self._active_download_url,
+                    active_url,
                     status="Stahuji",
                 )
             if self._paused_info_text:
@@ -2660,9 +2902,9 @@ class MainWindow(QMainWindow):
         self._download_paused = True
         self._paused_info_text = self.download_info_label.text()
         self.pause_download_button.setText("Pokračovat")
-        if self._active_download_url:
+        for active_url in list(self._active_download_urls):
             self.storage.update_job(
-                self._active_download_url,
+                active_url,
                 status="Pozastaveno",
             )
         self.download_info_label.setText("Stahování je pozastavené.")
@@ -2683,9 +2925,9 @@ class MainWindow(QMainWindow):
         self.cancel_download_button.setEnabled(False)
         worker.cancel()
 
-        if self._active_download_url:
+        for active_url in list(self._active_download_urls):
             self.storage.update_job(
-                self._active_download_url,
+                active_url,
                 status="Ruším…",
                 last_error="",
             )
@@ -2734,6 +2976,7 @@ class MainWindow(QMainWindow):
     @Slot(str, int, int)
     def _item_started(self, url: str, index: int, total: int):
         self._active_download_url = url
+        self._active_download_urls.add(url)
         if self._download_cancel_requested:
             self.storage.update_job(
                 url,
@@ -2793,7 +3036,7 @@ class MainWindow(QMainWindow):
         if self._download_paused:
             row = self._row_for_url(url)
             if row >= 0:
-                self.table.item(row, 7).setText("Pozastaveno")
+                self.table.item(row, 8).setText("Pozastaveno")
             return
 
         profile_name = (
@@ -2806,6 +3049,10 @@ class MainWindow(QMainWindow):
             self.download_info_label.setText(
                 f"Ruční videa • Rychlost celkem: {speed_text} • až {MAX_PARALLEL_DOWNLOADS} souběžně"
             )
+        elif progress_mode == "Fronta":
+            self.download_info_label.setText(
+                f"Fronta profilů • Rychlost celkem: {speed_text} • až {MAX_PARALLEL_DOWNLOADS} videí souběžně"
+            )
         elif progress_mode == "Souběžně":
             self.download_info_label.setText(
                 f"Profil: {profile_name} • Rychlost celkem: {speed_text} • {MAX_PARALLEL_DOWNLOADS} souběžně"
@@ -2815,7 +3062,7 @@ class MainWindow(QMainWindow):
                 f"Profil: {profile_name} • Rychlost: {speed_text}"
             )
 
-        if progress_mode in {"Souběžně", "Ruční"} and video_total > 1:
+        if progress_mode in {"Souběžně", "Ruční", "Fronta"} and video_total > 1:
             self.progress.setFormat(
                 f"Videa {video_index}/{video_total} • %p%"
             )
@@ -2828,10 +3075,11 @@ class MainWindow(QMainWindow):
 
         row = self._row_for_url(url)
         if row >= 0:
-            self.table.item(row, 7).setText("Stahuji")
+            self.table.item(row, 8).setText("Stahuji")
 
     @Slot(str)
     def _item_cancelled(self, url: str):
+        self._active_download_urls.discard(url)
         self.storage.update_job(
             url,
             status="Zrušeno",
@@ -2860,6 +3108,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str, bool, str, str)
     def _item_finished(self, url: str, success: bool, message: str, title: str):
+        self._active_download_urls.discard(url)
         if self._manual_video_batch:
             if not success and message:
                 self.statusBar().showMessage(message, 8000)
@@ -3002,6 +3251,7 @@ class MainWindow(QMainWindow):
         self.download_worker = None
         self._current_urls = []
         self._active_download_url = ""
+        self._active_download_urls.clear()
         self._download_paused = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
