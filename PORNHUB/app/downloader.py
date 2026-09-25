@@ -664,6 +664,14 @@ def download_url(
         "--progress",
         "--impersonate",
         "Chrome-145:Macos-26",
+        # Konzervativní zrychlení bez externího downloaderu:
+        # u přímého MP4 rozdělíme HTTP přenos na 10MiB range bloky, což může
+        # obejít throttling jednoho dlouhého spojení na CDN. U fragmentovaných
+        # formátů dovolíme dvě části současně. Obě volby jsou pro yt-dlp nativní.
+        "--http-chunk-size",
+        "10M",
+        "--concurrent-fragments",
+        "2",
         "-f",
         BEST_FORMAT,
         "--download-archive",
