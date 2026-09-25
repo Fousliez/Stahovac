@@ -42,9 +42,10 @@ Tento soubor je průběžný zdroj požadavků pro Pornhub část aplikace. Kaž
 ## Paralelní stahování
 
 - Fronta se týká i více vybraných profilů, nejen více videí uvnitř jednoho profilu.
-- V jednom okamžiku se zpracovává jeden profil; z něj běží nejvýše 5 videí současně a další videa téhož profilu čekají ve frontě.
-- Jakmile jsou dokončena všechna videa aktuálního profilu, stahovač automaticky přejde na další vybraný profil ve frontě a opět z něj spustí nejvýše 5 videí současně.
-- Příklad: profil A má 6 nových videí a profil B má 12 nových videí. U A se spustí 5 videí, šesté naváže po uvolnění místa; po dokončení všech 6 se přejde na B, kde se stejným způsobem zpracuje všech 12.
+- Existuje jedna společná fronta videí napříč všemi vybranými profily a celkový limit je nejvýše 5 současně stahovaných videí.
+- Fronta se nesmí zbytečně zastavit na hranici profilu. Jakmile se uvolní slot, vezme se další video v pořadí fronty, i kdyby už patřilo následujícímu profilu.
+- Příklad: u profilu A zbývají poslední 2 videa a ve frontě čeká profil B. Současně mohou běžet 2 videa z A a 3 videa z B, aby všech 5 slotů zůstalo využitých.
+- Pořadí fronty zůstává po profilech: nejdřív se do fronty vloží všechna videa profilu A, pak profilu B atd.; překryv mezi profily vznikne přirozeně při uvolňování pěti pracovních slotů.
 - Toto chování má platit pro `Stáhnout nové` i `Stáhnout novější…`.
 - U profilu se může stahovat až 5 videí současně.
 - Paralelní režim se používá jen tehdy, když aplikace zná konkrétní video ID z posledního scanu.
