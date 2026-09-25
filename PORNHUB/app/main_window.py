@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QObject, QThread, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QThread, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -120,26 +120,20 @@ class HoverRowTableWidget(QTableWidget):
     def mousePressEvent(self, event):
         index = self.indexAt(event.position().toPoint())
 
-        # První úzký sloupec je checkbox. Kliknutí na něj pouze přidá/odebere
-        # daný řádek z výběru a nikdy nesmí přerovnat tabulku.
+        # První úzký sloupec je jen informativní checkbox/marker.
+        # Nemá žádnou vazbu na výběr řádku ani na akce nad vybranými profily.
         if (
             event.button() == Qt.LeftButton
             and index.isValid()
             and index.column() == 0
         ):
-            model = self.selectionModel()
-            if model is not None:
-                row_index = self.model().index(index.row(), 0)
-                selected = model.isRowSelected(
-                    index.row(),
-                    self.rootIndex(),
+            item = self.item(index.row(), 0)
+            if item is not None:
+                item.setCheckState(
+                    Qt.Unchecked
+                    if item.checkState() == Qt.Checked
+                    else Qt.Checked
                 )
-                flags = (
-                    QItemSelectionModel.Deselect | QItemSelectionModel.Rows
-                    if selected
-                    else QItemSelectionModel.Select | QItemSelectionModel.Rows
-                )
-                model.select(row_index, flags)
             event.accept()
             return
 
@@ -1196,8 +1190,8 @@ class MainWindow(QMainWindow):
         self.table.cellDoubleClicked.connect(self.open_row_url)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_job_context_menu)
-        self.table.itemSelectionChanged.connect(self.sync_row_checkboxes)
         self.table.itemSelectionChanged.connect(self.update_profile_count)
+        self.table.itemChanged.connect(self.save_info_checkbox)
         self.table.setColumnWidth(0, 34)
         layout.addWidget(self.table, 1)
 
@@ -1520,10 +1514,10 @@ class MainWindow(QMainWindow):
 
             checkbox_item = QTableWidgetItem()
             checkbox_item.setFlags(
-                Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+                Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
             )
             checkbox_item.setCheckState(
-                Qt.Checked if url in current else Qt.Unchecked
+                Qt.Checked if bool(job.get("info_checked", False)) else Qt.Unchecked
             )
             checkbox_item.setTextAlignment(Qt.AlignCenter)
             checkbox_item.setData(Qt.UserRole, url)
@@ -1547,7 +1541,6 @@ class MainWindow(QMainWindow):
         self.table.resizeColumnsToContents()
         self.table.setColumnWidth(0, 34)
         self.table.blockSignals(False)
-        self.sync_row_checkboxes()
 
         self.count_label.setText(f"ODKAZY: {len(jobs)}")
         self.filter_jobs(self.search_edit.text())
@@ -1609,28 +1602,16 @@ class MainWindow(QMainWindow):
 
         self.update_profile_count()
 
-    def sync_row_checkboxes(self):
-        if not hasattr(self, "table"):
+    def save_info_checkbox(self, item: QTableWidgetItem):
+        if item.column() != 0:
             return
-
-        model = self.table.selectionModel()
-        selected_rows = {
-            index.row()
-            for index in model.selectedRows()
-        } if model is not None else set()
-
-        was_blocked = self.table.blockSignals(True)
-        try:
-            for row in range(self.table.rowCount()):
-                checkbox_item = self.table.item(row, 0)
-                if checkbox_item is None:
-                    continue
-                checkbox_item.setCheckState(
-                    Qt.Checked if row in selected_rows else Qt.Unchecked
-                )
-        finally:
-            self.table.blockSignals(was_blocked)
-        self.table.viewport().update()
+        url = str(item.data(Qt.UserRole) or "").strip()
+        if not url:
+            return
+        self.storage.update_job(
+            url,
+            info_checked=(item.checkState() == Qt.Checked),
+        )
 
     def update_profile_count(self):
         if not hasattr(self, "profile_count_label") or not hasattr(self, "table"):
