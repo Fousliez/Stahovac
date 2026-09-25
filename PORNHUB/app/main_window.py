@@ -192,6 +192,7 @@ class DownloadWorker(QObject):
         self.control = DownloadControl()
         self._disk_space_lock = threading.RLock()
         self._disk_space_paused = False
+        self._low_disk_override = False
 
     def _free_space_bytes(self) -> int:
         target = Path(self.destination).expanduser()
@@ -202,6 +203,10 @@ class DownloadWorker(QObject):
             return MIN_FREE_SPACE_BYTES
 
     def _check_disk_space(self) -> bool:
+        with self._disk_space_lock:
+            if self._low_disk_override:
+                return True
+
         free_bytes = self._free_space_bytes()
         if free_bytes >= MIN_FREE_SPACE_BYTES:
             return True
@@ -215,12 +220,21 @@ class DownloadWorker(QObject):
             self.disk_space_low.emit(free_bytes)
         return False
 
+    def allow_low_disk_override(self) -> bool:
+        with self._disk_space_lock:
+            self._low_disk_override = True
+            self._disk_space_paused = False
+        return self.control.resume()
+
     def pause(self) -> bool:
         return self.control.pause()
 
     def resume(self) -> bool:
+        with self._disk_space_lock:
+            override = self._low_disk_override
+
         free_bytes = self._free_space_bytes()
-        if free_bytes < MIN_FREE_SPACE_BYTES:
+        if not override and free_bytes < MIN_FREE_SPACE_BYTES:
             with self._disk_space_lock:
                 self._disk_space_paused = True
             self.disk_space_low.emit(free_bytes)
@@ -1286,6 +1300,7 @@ class MainWindow(QMainWindow):
         self._active_download_urls: set[str] = set()
         self._download_paused = False
         self._download_paused_for_disk = False
+        self._low_disk_override = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
         self._download_reference_url = ""
@@ -3239,12 +3254,52 @@ class MainWindow(QMainWindow):
         self.refresh_jobs()
 
         if first_notice:
-            QMessageBox.warning(
-                self,
-                "Stahování pozastaveno",
-                "Na disku, kam se videa stahují, zbývá méně než 2 GB volného místa.\n\n"
-                "Stahování bylo automaticky pozastaveno. Uvolni místo a potom klikni na „Pokračovat“.",
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("Stahování pozastaveno")
+            box.setText(
+                "Na disku, kam se videa stahují, zbývá méně než 2 GB volného místa."
             )
+            box.setInformativeText(
+                "Stahování bylo automaticky pozastaveno. Doporučené je uvolnit místo. "
+                "Můžeš ale potvrdit pokračování pod limitem 2 GB pouze pro tento běh."
+            )
+            keep_button = box.addButton(
+                "Nechat pozastavené",
+                QMessageBox.RejectRole,
+            )
+            continue_button = box.addButton(
+                "Pokračovat pod 2 GB",
+                QMessageBox.DestructiveRole,
+            )
+            box.setDefaultButton(keep_button)
+            box.exec()
+
+            if box.clickedButton() == continue_button:
+                worker = self.download_worker
+                if worker is not None:
+                    confirm = QMessageBox.question(
+                        self,
+                        "Potvrdit pokračování",
+                        "Opravdu pokračovat pod limitem 2 GB? Ochrana volného místa bude pro tento běh vypnutá.",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if confirm == QMessageBox.Yes and worker.allow_low_disk_override():
+                        self._low_disk_override = True
+                        self._download_paused = False
+                        self._download_paused_for_disk = False
+                        self.pause_download_button.setText("Pozastavit")
+                        for active_url in list(self._active_download_urls):
+                            self.storage.update_job(active_url, status="Stahuji")
+                        self.download_info_label.setText(
+                            f"Pokračuji pod limitem 2 GB ({free_gb:.2f} GB volných)."
+                        )
+                        self.statusBar().showMessage(
+                            "Ochrana 2 GB je pro tento běh dočasně vypnutá.",
+                            10000,
+                        )
+                        self.refresh_jobs()
 
     @Slot(str)
     def _download_failed(self, message: str):
