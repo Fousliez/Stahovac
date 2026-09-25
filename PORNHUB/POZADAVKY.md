@@ -13,6 +13,13 @@ Tento soubor je průběžný zdroj požadavků pro Pornhub část aplikace. Kaž
 
 ## Profily a odkazy
 
+- Dialog `+ Odkazy` používá samostatné řádky místo jednoho velkého textového pole.
+- Ve výchozím stavu má 5 řádků.
+- Dole má tlačítka pro přidání dalších `+1`, `+5` a `+10` řádků.
+- Každý řádek má vlevo profil/seznam a vpravo volitelné „Poslední známé video“.
+- Poslední známé video se ukládá ke konkrétnímu profilu a přežije restart aplikace.
+- Po kontrole profilu se uložené referenční video a všechna starší videa označí jako známá; ke stažení zůstanou pouze novější položky.
+- U již existujícího profilu lze stejným dialogem doplnit nebo změnit jeho uložené poslední známé video.
 - Tlačítko `+ Odkazy` přidává Pornhub profily, seznamy nebo odkazy.
 - Nové profily se mají přidávat i během probíhajícího stahování.
 - Nové profily se mají přidávat i během `Projít vybrané`.
