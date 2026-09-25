@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QScrollArea,
     QStatusBar,
     QStyledItemDelegate,
     QTabBar,
@@ -668,21 +670,56 @@ class MarkCurrentDialog(QDialog):
 
 
 class AddUrlsDialog(QDialog):
+    INITIAL_ROWS = 5
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Přidat odkazy")
-        self.resize(680, 360)
+        self.setWindowTitle("Přidat profily")
+        self.resize(980, 470)
+        self._rows: list[tuple[QLineEdit, QLineEdit]] = []
 
         layout = QVBoxLayout(self)
         info = QLabel(
-            "Vlož odkazy na videa, profily nebo seznamy. Každý odkaz dej na samostatný řádek."
+            "Vlevo vlož profil nebo seznam. Vpravo můžeš volitelně vložit "
+            "poslední známé video. Po kontrole profilu budou toto video a "
+            "všechna starší považována za známá, takže ke stažení zůstanou "
+            "jen novější videa."
         )
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        self.edit = QTextEdit()
-        self.edit.setPlaceholderText("https://www.pornhub.com/view_video.php?viewkey=…")
-        layout.addWidget(self.edit, 1)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.rows_widget = QWidget()
+        self.rows_layout = QGridLayout(self.rows_widget)
+        self.rows_layout.setContentsMargins(8, 8, 8, 8)
+        self.rows_layout.setHorizontalSpacing(10)
+        self.rows_layout.setVerticalSpacing(7)
+
+        left_header = QLabel("Profil / seznam")
+        left_header.setStyleSheet("font-weight: 700;")
+        right_header = QLabel("Poslední známé video (volitelné)")
+        right_header.setStyleSheet("font-weight: 700;")
+        self.rows_layout.addWidget(QLabel(""), 0, 0)
+        self.rows_layout.addWidget(left_header, 0, 1)
+        self.rows_layout.addWidget(right_header, 0, 2)
+
+        self.scroll.setWidget(self.rows_widget)
+        layout.addWidget(self.scroll, 1)
+
+        for _ in range(self.INITIAL_ROWS):
+            self.add_rows(1)
+
+        add_row = QHBoxLayout()
+        add_row.addWidget(QLabel("Přidat řádky:"))
+        for amount in (1, 5, 10):
+            button = QPushButton(f"+ {amount}")
+            button.clicked.connect(
+                lambda _checked=False, count=amount: self.add_rows(count)
+            )
+            add_row.addWidget(button)
+        add_row.addStretch(1)
+        layout.addLayout(add_row)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Přidat")
@@ -691,8 +728,42 @@ class AddUrlsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def urls(self) -> list[str]:
-        return [line.strip() for line in self.edit.toPlainText().splitlines() if line.strip()]
+    def add_rows(self, count: int):
+        for _ in range(max(0, int(count))):
+            row_number = len(self._rows) + 1
+            profile_edit = QLineEdit()
+            profile_edit.setPlaceholderText(
+                "https://www.pornhub.com/model/..."
+            )
+            reference_edit = QLineEdit()
+            reference_edit.setPlaceholderText(
+                "https://www.pornhub.com/view_video.php?viewkey=..."
+            )
+            grid_row = len(self._rows) + 1
+            number = QLabel(str(row_number))
+            number.setAlignment(Qt.AlignCenter)
+            self.rows_layout.addWidget(number, grid_row, 0)
+            self.rows_layout.addWidget(profile_edit, grid_row, 1)
+            self.rows_layout.addWidget(reference_edit, grid_row, 2)
+            self._rows.append((profile_edit, reference_edit))
+
+        if self._rows:
+            self._rows[-1][0].setFocus()
+
+    def entries(self) -> list[dict]:
+        result: list[dict] = []
+        for profile_edit, reference_edit in self._rows:
+            url = profile_edit.text().strip()
+            reference_url = reference_edit.text().strip()
+            if not url and not reference_url:
+                continue
+            result.append(
+                {
+                    "url": url,
+                    "reference_url": reference_url,
+                }
+            )
+        return result
 
 
 class ManualVideosDialog(QDialog):
@@ -1867,17 +1938,64 @@ class MainWindow(QMainWindow):
         dialog = AddUrlsDialog(self)
         if dialog.exec() != QDialog.Accepted:
             return
-        urls = dialog.urls()
-        invalid = []
-        for url in urls:
+
+        entries = dialog.entries()
+        if not entries:
+            return
+
+        invalid_profiles: list[str] = []
+        invalid_references: list[str] = []
+
+        for entry in entries:
+            url = str(entry.get("url") or "").strip()
+            reference_url = str(entry.get("reference_url") or "").strip()
+
             try:
                 host = (urlparse(url).hostname or "").casefold()
             except ValueError:
                 host = ""
-            if not host or not (host == "pornhub.com" or host.endswith(".pornhub.com")):
-                invalid.append(url)
-        if invalid:
-            QMessageBox.warning(self, "Odkazy", "Tahle část přijímá jen odkazy z Pornhubu.")
+            if (
+                not url
+                or not host
+                or not (host == "pornhub.com" or host.endswith(".pornhub.com"))
+            ):
+                invalid_profiles.append(url or "(prázdný profil)")
+                continue
+
+            if reference_url:
+                try:
+                    reference_host = (
+                        urlparse(reference_url).hostname or ""
+                    ).casefold()
+                except ValueError:
+                    reference_host = ""
+                if (
+                    not reference_host
+                    or not (
+                        reference_host == "pornhub.com"
+                        or reference_host.endswith(".pornhub.com")
+                    )
+                    or "view_video.php" not in reference_url.casefold()
+                    or not self._video_id_from_url(reference_url)
+                ):
+                    invalid_references.append(reference_url)
+
+        if invalid_profiles:
+            QMessageBox.warning(
+                self,
+                "Přidat profily",
+                "Některý profilový odkaz není platný Pornhub odkaz:\n\n"
+                + "\n".join(invalid_profiles[:8]),
+            )
+            return
+
+        if invalid_references:
+            QMessageBox.warning(
+                self,
+                "Přidat profily",
+                "Některé poslední známé video není platný Pornhub video odkaz:\n\n"
+                + "\n".join(invalid_references[:8]),
+            )
             return
 
         existing = {
@@ -1885,12 +2003,12 @@ class MainWindow(QMainWindow):
             for job in self.storage.jobs()
         }
         added_urls = [
-            url.strip()
-            for url in urls
-            if url.strip() and url.strip() not in existing
+            str(entry.get("url") or "").strip()
+            for entry in entries
+            if str(entry.get("url") or "").strip() not in existing
         ]
 
-        added = self.storage.add_urls(urls)
+        added, references_updated = self.storage.add_source_entries(entries)
         self.refresh_jobs()
 
         if added_urls:
@@ -1907,7 +2025,10 @@ class MainWindow(QMainWindow):
             if first_row >= 0:
                 self.table.setCurrentCell(first_row, 0)
 
-        self.statusBar().showMessage(f"Přidáno odkazů: {added}", 3000)
+        message = f"Přidáno profilů: {added}"
+        if references_updated:
+            message += f" • uložených referencí: {references_updated}"
+        self.statusBar().showMessage(message, 4000)
 
     def delete_selected(self):
         urls = self.selected_urls()
@@ -2085,6 +2206,29 @@ class MainWindow(QMainWindow):
             self._scan_renames.append(rename_info)
 
         self.storage.save_scan(effective_url, items)
+
+        # Profil může mít při přidání uložené poslední známé video. Po prvním
+        # (i dalším) scanu označíme toto video a vše starší jako známé.
+        current_job = self.storage.job(effective_url) or {}
+        saved_reference = str(
+            current_job.get("ph_reference_url") or ""
+        ).strip()
+        if saved_reference:
+            reference_id = self._video_id_from_url(saved_reference)
+            reference_index = next(
+                (
+                    position
+                    for position, item in enumerate(items)
+                    if str(item.get("id") or "").strip() == reference_id
+                ),
+                -1,
+            )
+            if reference_index >= 0:
+                self.storage.mark_known_items(
+                    effective_url,
+                    items[reference_index:],
+                )
+
         total_count, downloaded_count, new_count = self.storage.scan_counts(
             effective_url
         )
