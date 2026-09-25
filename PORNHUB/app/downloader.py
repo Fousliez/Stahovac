@@ -47,7 +47,7 @@ class DownloadControl:
 
     def __init__(self):
         self._lock = threading.RLock()
-        self._process: subprocess.Popen | None = None
+        self._processes: set[subprocess.Popen] = set()
         self._paused = False
         self._cancelled = False
 
@@ -63,7 +63,7 @@ class DownloadControl:
 
     def attach(self, process: subprocess.Popen) -> None:
         with self._lock:
-            self._process = process
+            self._processes.add(process)
             cancelled = self._cancelled
             paused = self._paused
 
@@ -74,8 +74,7 @@ class DownloadControl:
 
     def detach(self, process: subprocess.Popen) -> None:
         with self._lock:
-            if self._process is process:
-                self._process = None
+            self._processes.discard(process)
 
     def pause(self) -> bool:
         if os.name != "posix":
@@ -85,11 +84,12 @@ class DownloadControl:
             if self._cancelled:
                 return False
             self._paused = True
-            process = self._process
+            processes = list(self._processes)
 
-        if process is None:
+        if not processes:
             return True
-        return _send_process_signal(process, signal.SIGSTOP)
+        results = [_send_process_signal(process, signal.SIGSTOP) for process in processes]
+        return any(results)
 
     def resume(self) -> bool:
         with self._lock:
@@ -97,15 +97,16 @@ class DownloadControl:
                 return False
             was_paused = self._paused
             self._paused = False
-            process = self._process
+            processes = list(self._processes)
 
         if not was_paused:
             return True
-        if process is None:
+        if not processes:
             return True
         if os.name != "posix":
             return False
-        return _send_process_signal(process, signal.SIGCONT)
+        results = [_send_process_signal(process, signal.SIGCONT) for process in processes]
+        return any(results)
 
     def cancel(self) -> bool:
         with self._lock:
@@ -113,22 +114,25 @@ class DownloadControl:
             self._cancelled = True
             was_paused = self._paused
             self._paused = False
-            process = self._process
+            processes = list(self._processes)
 
         if already_cancelled:
             return True
-        if process is None:
+        if not processes:
             return True
 
         if was_paused and os.name == "posix":
-            _send_process_signal(process, signal.SIGCONT)
-        _send_process_signal(process, signal.SIGTERM)
+            for process in processes:
+                _send_process_signal(process, signal.SIGCONT)
+        for process in processes:
+            _send_process_signal(process, signal.SIGTERM)
 
         if os.name == "posix":
             def force_kill():
                 threading.Event().wait(3)
-                if process.poll() is None:
-                    _send_process_signal(process, signal.SIGKILL)
+                for process in processes:
+                    if process.poll() is None:
+                        _send_process_signal(process, signal.SIGKILL)
 
             threading.Thread(target=force_kill, daemon=True).start()
         return True
@@ -421,6 +425,13 @@ def resolve_reference_cutoff(
         "--print",
         "%(timestamp|0)s\t%(upload_date|)s",
     ]
+    if use_archive:
+        # V běžném sekvenčním režimu necháváme ochranu proti duplicitám i na
+        # yt-dlp. Paralelní režim vybírá pouze DB-ově nové položky, takže se
+        # vyhne dvěma procesům zapisujícím současně do stejného archive souboru.
+        insert_at = cmd.index("-P")
+        cmd[insert_at:insert_at] = ["--download-archive", str(archive)]
+
     if cookies_file.strip():
         cmd.extend(["--cookies", str(Path(cookies_file).expanduser())])
     cmd.append(reference)
@@ -630,6 +641,8 @@ def download_url(
     reference_timestamp: int = 0,
     reference_date_after: str = "",
     control: DownloadControl | None = None,
+    use_archive: bool = True,
+    source_url_override: str = "",
 ) -> str:
     """Stáhne URL přes stejný CLI režim yt-dlp, který je ověřený ručně.
 
@@ -664,18 +677,10 @@ def download_url(
         "--progress",
         "--impersonate",
         "Chrome-145:Macos-26",
-        # Konzervativní zrychlení bez externího downloaderu:
-        # u přímého MP4 rozdělíme HTTP přenos na 10MiB range bloky, což může
-        # obejít throttling jednoho dlouhého spojení na CDN. U fragmentovaných
-        # formátů dovolíme dvě části současně. Obě volby jsou pro yt-dlp nativní.
-        "--http-chunk-size",
-        "10M",
-        "--concurrent-fragments",
-        "2",
+        # Přímé MP4 necháváme na jednom stabilním HTTP spojení. Range chunking
+        # některé Pornhub CDN uzly umí výrazně zdržet ještě před prvním bajtem.
         "-f",
         BEST_FORMAT,
-        "--download-archive",
-        str(archive),
         "-P",
         str(target),
         "-o",
@@ -781,7 +786,7 @@ def download_url(
                     "uploader": parts[3].strip() if len(parts) > 3 else "",
                     "title": parts[4].strip() if len(parts) > 4 else "",
                     "filepath": parts[5].strip() if len(parts) > 5 else "",
-                    "source_url": url,
+                    "source_url": str(source_url_override or url),
                 }
                 if item["title"]:
                     final_title = item["title"]
