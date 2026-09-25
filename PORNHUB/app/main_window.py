@@ -1013,6 +1013,18 @@ class MainWindow(QMainWindow):
             and event.button() == Qt.LeftButton
         ):
             self.clear_table_selection()
+
+        # QTabBar zabírá celý pruh mezi poslední záložkou kategorie a
+        # tlačítkem „+ Kategorie“. Kliknutí do jeho prázdné části proto
+        # nešlo přes centrální šedé pozadí a výběr řádků zůstával viset.
+        if (
+            event.type() == QEvent.MouseButtonPress
+            and watched is getattr(self, "category_tabs", None)
+            and event.button() == Qt.LeftButton
+            and self.category_tabs.tabAt(event.position().toPoint()) < 0
+        ):
+            self.clear_table_selection()
+
         return super().eventFilter(watched, event)
 
     def open_requirements(self):
@@ -1069,6 +1081,7 @@ class MainWindow(QMainWindow):
         self.category_tabs.currentChanged.connect(
             lambda _index: self.filter_jobs(self.search_edit.text())
         )
+        self.category_tabs.installEventFilter(self)
         category_row.addWidget(self.category_tabs, 1)
 
         self.add_category_button = QPushButton("+ Kategorie")
