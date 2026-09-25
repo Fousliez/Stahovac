@@ -2909,6 +2909,7 @@ class MainWindow(QMainWindow):
         self._active_download_urls.clear()
         self._download_paused = False
         self._download_paused_for_disk = False
+        self._low_disk_override = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
         self._download_reference_url = reference_url
@@ -2948,14 +2949,32 @@ class MainWindow(QMainWindow):
 
                 if free_bytes < MIN_FREE_SPACE_BYTES:
                     free_gb = free_bytes / (1024 ** 3)
-                    self.download_info_label.setText(
-                        f"Pozastaveno • málo místa na disku ({free_gb:.2f} GB volných)"
+                    confirm = QMessageBox.question(
+                        self,
+                        "Pokračovat pod 2 GB",
+                        (
+                            f"Na cílovém disku je jen {free_gb:.2f} GB volných.\n\n"
+                            "Chceš pro tento běh potvrdit pokračování a dočasně vypnout ochranu 2 GB?"
+                        ),
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
                     )
-                    self.statusBar().showMessage(
-                        "Stahování zůstává pozastavené: na cílovém disku je méně než 2 GB volného místa.",
-                        7000,
-                    )
-                    return
+                    if confirm != QMessageBox.Yes:
+                        self.download_info_label.setText(
+                            f"Pozastaveno • málo místa na disku ({free_gb:.2f} GB volných)"
+                        )
+                        self.statusBar().showMessage(
+                            "Stahování zůstává pozastavené.",
+                            7000,
+                        )
+                        return
+                    if not worker.allow_low_disk_override():
+                        self.statusBar().showMessage(
+                            "Pokračování pod limitem se nepodařilo aktivovat.",
+                            5000,
+                        )
+                        return
+                    self._low_disk_override = True
 
             if not worker.resume():
                 self.statusBar().showMessage(
@@ -3412,6 +3431,7 @@ class MainWindow(QMainWindow):
         self._active_download_urls.clear()
         self._download_paused = False
         self._download_paused_for_disk = False
+        self._low_disk_override = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
         self._download_reference_url = ""
