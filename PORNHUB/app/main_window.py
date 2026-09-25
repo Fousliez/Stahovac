@@ -1462,12 +1462,13 @@ class MainWindow(QMainWindow):
         self.count_label.setObjectName("sectionTitle")
         layout.addWidget(self.count_label)
 
-        self.table = HoverRowTableWidget(0, 9)
+        self.table = HoverRowTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels(
             [
                 "",
                 "Název",
                 "Kategorie",
+                "Hodnocení",
                 "Odkaz",
                 "Poslední kontrola",
                 "Nové",
@@ -1791,9 +1792,14 @@ class MainWindow(QMainWindow):
                     status = "Aktuální"
 
             category = str(job.get("category") or "").strip()
+            profile_rating = str(job.get("profile_rating") or "").strip().upper()
+            if profile_rating not in {"SUPER", "GOOD", "ASI NIC"}:
+                profile_rating = ""
+
             values = [
                 title,
                 category or "—",
+                profile_rating or "—",
                 url,
                 self.format_last_check(last_run),
                 new_text,
@@ -1806,6 +1812,7 @@ class MainWindow(QMainWindow):
             sort_values = [
                 title.casefold(),
                 category.casefold(),
+                profile_rating.casefold(),
                 url.casefold(),
                 last_run_sort,
                 new_count,
@@ -1831,7 +1838,7 @@ class MainWindow(QMainWindow):
                 column = data_column + 1
                 item = SortableTableWidgetItem(value, sort_values[data_column])
                 item.setData(Qt.UserRole, url)
-                if data_column in {4, 5, 6}:
+                if data_column in {2, 5, 6, 7}:
                     item.setTextAlignment(Qt.AlignCenter)
                 if status == "Aktuální":
                     item.setBackground(QColor("#e6f4e6"))
@@ -2188,6 +2195,21 @@ class MainWindow(QMainWindow):
         category_menu.addSeparator()
         new_category_action = category_menu.addAction("Nová kategorie…")
 
+        rating_menu = menu.addMenu("Hodnocení profilu")
+        rating_actions: list[tuple[object, str]] = []
+        current_rating = str(job.get("profile_rating") or "").strip().upper()
+        for label, value in (
+            ("Bez hodnocení", ""),
+            ("SUPER", "SUPER"),
+            ("GOOD", "GOOD"),
+            ("ASI NIC", "ASI NIC"),
+        ):
+            action = rating_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(current_rating == value)
+            rating_actions.append((action, value))
+        rating_menu.setEnabled(not self.is_single_video_url(url))
+
         menu.addSeparator()
         current_action = menu.addAction("Nastavit jako aktuální…")
         current_action.setEnabled(
@@ -2212,6 +2234,19 @@ class MainWindow(QMainWindow):
             self.show_last_error(url)
         elif chosen == new_category_action:
             self.create_category(self.selected_urls())
+        elif any(chosen == action for action, _rating in rating_actions):
+            rating = next(
+                rating
+                for action, rating in rating_actions
+                if chosen == action
+            )
+            profile_urls = [
+                selected_url
+                for selected_url in self.selected_urls()
+                if not self.is_single_video_url(selected_url)
+            ]
+            self.storage.set_profile_rating(profile_urls, rating)
+            self.refresh_jobs()
         elif any(chosen == action for action, _category in category_actions):
             category = next(
                 category
@@ -3140,7 +3175,7 @@ class MainWindow(QMainWindow):
         if self._download_paused:
             row = self._row_for_url(url)
             if row >= 0:
-                self.table.item(row, 8).setText("Pozastaveno")
+                self.table.item(row, 9).setText("Pozastaveno")
             return
 
         profile_name = (
@@ -3179,7 +3214,7 @@ class MainWindow(QMainWindow):
 
         row = self._row_for_url(url)
         if row >= 0:
-            self.table.item(row, 8).setText("Stahuji")
+            self.table.item(row, 9).setText("Stahuji")
 
     @Slot(str)
     def _item_cancelled(self, url: str):
