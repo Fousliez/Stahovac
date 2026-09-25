@@ -66,11 +66,12 @@ Tento soubor je průběžný zdroj požadavků pro Pornhub část aplikace. Kaž
 
 ## Tabulka a stav řádků
 
-- Každý řádek má vlevo vlastní viditelný checkbox s fajfkou pro označení řádku.
-- Checkbox odpovídá skutečnému výběru řádku; kliknutí na checkbox řádek přidá nebo odebere z výběru bez nutnosti držet Ctrl.
+- Každý řádek má vlevo vlastní viditelný informativní checkbox s fajfkou.
+- Checkbox není výběrový: neoznačuje ani neodznačuje řádek a nijak neurčuje, nad kterými profily se provedou akce.
+- Checkbox je pouze uživatelský marker a jeho stav se ukládá k profilu, aby přežil refresh i restart aplikace.
 - Změna checkboxu nesmí nikdy změnit pořadí řádků ani vyvolat automatické řazení.
 - Sloupec checkboxů se nikdy neřadí ani po kliknutí na jeho hlavičku.
-- Buňka s checkboxem musí barevně souhlasit se zbytkem řádku, včetně zeleného stavu `Aktuální` a modrého označení výběru.
+- Buňka s checkboxem musí barevně souhlasit se zbytkem řádku, včetně zeleného stavu `Aktuální` a modrého označení výběru řádku.
 - Fajfka v označeném checkboxu musí být jasně viditelná.
 - Sloupce: Název, Kategorie, Odkaz, Poslední kontrola, Nové, Staženo, Celkem, Stav.
 - Stav `Aktuální` má mít celý řádek světle zelené pozadí.
