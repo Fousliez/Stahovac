@@ -929,6 +929,15 @@ class SettingsDialog(QDialog):
         form.addRow("Cookies soubor:", cookie_row)
 
         layout.addLayout(form)
+
+        self.skip_short_videos = QCheckBox(
+            "Automaticky označit videa kratší než 60 sekund jako známá"
+        )
+        self.skip_short_videos.setChecked(
+            storage.get_setting("skip_short_videos", "1") != "0"
+        )
+        layout.addWidget(self.skip_short_videos)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel
         )
@@ -972,6 +981,10 @@ class SettingsDialog(QDialog):
         )
         self.storage.set_setting(
             "cookies_file", self.cookies_edit.text().strip()
+        )
+        self.storage.set_setting(
+            "skip_short_videos",
+            "1" if self.skip_short_videos.isChecked() else "0",
         )
         self.accept()
 
@@ -2301,6 +2314,22 @@ class MainWindow(QMainWindow):
 
         self.storage.save_scan(effective_url, items)
 
+        short_skipped = 0
+        if self.storage.get_setting("skip_short_videos", "1") != "0":
+            short_items = []
+            for item in items:
+                try:
+                    duration = float(item.get("duration") or 0)
+                except (TypeError, ValueError):
+                    duration = 0.0
+                if 0 < duration < 60:
+                    short_items.append(item)
+            if short_items:
+                short_skipped = self.storage.mark_known_items(
+                    effective_url,
+                    short_items,
+                )
+
         # Profil může mít při přidání uložené poslední známé video. Po prvním
         # (i dalším) scanu označíme toto video a vše starší jako známé.
         current_job = self.storage.job(effective_url) or {}
@@ -2344,10 +2373,13 @@ class MainWindow(QMainWindow):
             last_error="",
         )
         self.progress.setValue(index)
-        self.download_info_label.setText(
+        scan_info = (
             f"Kontrola {index}/{total} • {total_count} celkem • "
             f"{new_count} nových • {downloaded_count} stažených"
         )
+        if short_skipped:
+            scan_info += f" • {short_skipped} krátkých přeskočeno"
+        self.download_info_label.setText(scan_info)
         self.refresh_jobs()
 
     @Slot(str, str, int, int)
