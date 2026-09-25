@@ -716,6 +716,7 @@ def download_url(
     recent_output: deque[str] = deque(maxlen=120)
     final_title = ""
     completed_any = False
+    saw_video_error = False
     current_video_index = 1
     current_video_total = 1
     assert process.stdout is not None
@@ -730,6 +731,12 @@ def download_url(
                 continue
 
             recent_output.append(line)
+
+            # yt-dlp může u profilu narazit na soukromé, smazané nebo
+            # dočasně nedostupné video. To je chyba jedné položky, ne
+            # celého profilu. Poznáme ji podle konkrétního Pornhub ID.
+            if re.match(r"^ERROR:\s+\[PornHub\]\s+\S+:", line):
+                saw_video_error = True
 
             if line.startswith(_ITEM_PREFIX):
                 payload = line[len(_ITEM_PREFIX):]
@@ -808,12 +815,12 @@ def download_url(
         raise DownloadCancelled("Stahování bylo zrušeno uživatelem.")
 
     if returncode != 0:
-        # U profilu může yt-dlp po několika úspěšných videích narazit na
-        # jednu vadnou položku a skončit nenulovým kódem. Hotová videa jsou
-        # už bezpečně zapsaná. Neoznačíme proto celý profil jako "Chyba";
-        # případná nedokončená nová videa zůstanou v databázi jako nová.
+        # U profilu může yt-dlp narazit na soukromé/smazané/dočasně
+        # nedostupné video a skončit nenulovým kódem, i když všechna
+        # dostupná videa už byla stažená nebo byla v archivu. Taková chyba
+        # jedné položky nesmí shodit celý profil do stavu "Chyba".
         is_profile_or_list = "view_video.php" not in str(url or "").casefold()
-        if not (is_profile_or_list and completed_any):
+        if not (is_profile_or_list and (completed_any or saw_video_error)):
             message = "\n".join(recent_output).strip() or f"yt-dlp skončil s kódem {returncode}."
             raise PornhubDownloadError(message)
 
