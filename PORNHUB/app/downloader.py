@@ -425,13 +425,6 @@ def resolve_reference_cutoff(
         "--print",
         "%(timestamp|0)s\t%(upload_date|)s",
     ]
-    if use_archive:
-        # V běžném sekvenčním režimu necháváme ochranu proti duplicitám i na
-        # yt-dlp. Paralelní režim vybírá pouze DB-ově nové položky, takže se
-        # vyhne dvěma procesům zapisujícím současně do stejného archive souboru.
-        insert_at = cmd.index("-P")
-        cmd[insert_at:insert_at] = ["--download-archive", str(archive)]
-
     if cookies_file.strip():
         cmd.extend(["--cookies", str(Path(cookies_file).expanduser())])
     cmd.append(reference)
@@ -699,6 +692,13 @@ def download_url(
             "%(webpage_url)s\t%(uploader|)s\t%(title)s\t%(filepath)s"
         ),
     ])
+
+    if use_archive:
+        # Sekvenční režim používá archive yt-dlp jako druhou ochranu proti
+        # duplicitám. Paralelní režim už dostává jen DB-ově nové položky a
+        # archive zapisuje až naše Storage po dokončení videa.
+        insert_at = cmd.index("-P")
+        cmd[insert_at:insert_at] = ["--download-archive", str(archive)]
 
     if cookies_file.strip():
         cmd.extend(["--cookies", str(Path(cookies_file).expanduser())])
