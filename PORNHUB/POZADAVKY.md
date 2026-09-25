@@ -59,6 +59,7 @@ Tento soubor je průběžný zdroj požadavků pro Pornhub část aplikace. Kaž
 - Označený/vybraný řádek má mít standardní modré označení výběru.
 - Řádek pod myší se nesmí podbarvovat. Hover se zobrazuje pouze jemným rámečkem kolem celého řádku.
 - Kliknutí do prázdné šedé plochy programu mimo tabulku má spolehlivě zrušit výběr jednoho i více řádků, i když uživatel klikne na pasivní text/štítek v šedé ploše.
+- Kliknutí do prázdné plochy uvnitř samotné tabulky (např. pod posledním řádkem, kde není žádná buňka) má také vždy zrušit výběr jednoho i více řádků.
 - Požadavky musí být zobrazitelné přímo v aplikaci přes samostatné tlačítko `Požadavky`; dialog čte průběžný soubor `PORNHUB/POZADAVKY.md`.
 - Dole pod tabulkou se zobrazuje počet profilů a počet označených profilů.
 - Počet označených profilů se aktualizuje při změně výběru.
