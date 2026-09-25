@@ -842,6 +842,8 @@ class MainWindow(QMainWindow):
         self._download_skipped_count = 0
         self._manual_video_batch = False
         self._manual_skipped_downloaded = 0
+        self._last_manual_sort_column = -1
+        self._last_manual_sort_order = Qt.AscendingOrder
 
         self.setWindowTitle(f"{APPLICATION_NAME} {BUILD_VERSION}")
         self.resize(1120, 760)
@@ -954,9 +956,13 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setSortingEnabled(True)
-        self.table.horizontalHeader().setSortIndicatorShown(True)
-        self.table.horizontalHeader().setSortIndicator(0, Qt.AscendingOrder)
+        # Řazení je záměrně vypnuté jako trvalý režim. Tabulka se seřadí
+        # pouze v okamžiku, kdy uživatel klikne na hlavičku sloupce.
+        self.table.setSortingEnabled(False)
+        self.table.horizontalHeader().setSortIndicatorShown(False)
+        self.table.horizontalHeader().sectionClicked.connect(
+            self.sort_table_by_column
+        )
         self.table.cellDoubleClicked.connect(self.open_row_url)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_job_context_menu)
@@ -1187,12 +1193,40 @@ class MainWindow(QMainWindow):
         jobs = self.storage.jobs()
         current = {url for url in self.selected_urls()}
 
-        sorting_enabled = self.table.isSortingEnabled()
-        sort_column = self.table.horizontalHeader().sortIndicatorSection()
-        sort_order = self.table.horizontalHeader().sortIndicatorOrder()
+        # Zachováme přesně současné vizuální pořadí řádků. Změna kategorie,
+        # data kontroly, stavu nebo počtů nesmí tabulku sama přerovnat.
+        previous_order: list[str] = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            url = str(item.data(Qt.UserRole) or "") if item else ""
+            if url:
+                previous_order.append(url)
+
+        jobs_by_url = {
+            str(job.get("url") or ""): job
+            for job in jobs
+            if str(job.get("url") or "")
+        }
+        ordered_jobs: list[dict] = []
+        seen_urls: set[str] = set()
+
+        for url in previous_order:
+            job = jobs_by_url.get(url)
+            if job is not None:
+                ordered_jobs.append(job)
+                seen_urls.add(url)
+
+        # Nově přidané profily se přidají na konec. Do existujícího pořadí
+        # se samy nezařazují podle žádného sloupce.
+        for job in jobs:
+            url = str(job.get("url") or "")
+            if url and url not in seen_urls:
+                ordered_jobs.append(job)
+                seen_urls.add(url)
+
+        jobs = ordered_jobs
 
         self.table.blockSignals(True)
-        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(jobs))
 
         for row, job in enumerate(jobs):
@@ -1264,13 +1298,29 @@ class MainWindow(QMainWindow):
                 self.table.selectRow(row)
 
         self.table.resizeColumnsToContents()
-        self.table.setSortingEnabled(sorting_enabled)
-        if sorting_enabled and sort_column >= 0:
-            self.table.sortItems(sort_column, sort_order)
         self.table.blockSignals(False)
 
         self.count_label.setText(f"ODKAZY: {len(jobs)}")
         self.filter_jobs(self.search_edit.text())
+        self.update_profile_count()
+
+    def sort_table_by_column(self, column: int):
+        """Jednorázově seřadí tabulku pouze po kliknutí na hlavičku."""
+        if column == self._last_manual_sort_column:
+            order = (
+                Qt.DescendingOrder
+                if self._last_manual_sort_order == Qt.AscendingOrder
+                else Qt.AscendingOrder
+            )
+        else:
+            order = Qt.AscendingOrder
+
+        self._last_manual_sort_column = column
+        self._last_manual_sort_order = order
+        header = self.table.horizontalHeader()
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(column, order)
+        self.table.sortItems(column, order)
         self.update_profile_count()
 
     def filter_jobs(self, text: str):
