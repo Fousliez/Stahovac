@@ -715,6 +715,7 @@ def download_url(
 
     recent_output: deque[str] = deque(maxlen=120)
     final_title = ""
+    completed_any = False
     current_video_index = 1
     current_video_total = 1
     assert process.stdout is not None
@@ -769,8 +770,10 @@ def download_url(
                 }
                 if item["title"]:
                     final_title = item["title"]
-                if completed_callback is not None and item["id"]:
-                    completed_callback(item)
+                if item["id"]:
+                    completed_any = True
+                    if completed_callback is not None:
+                        completed_callback(item)
                 continue
 
             match = _PROGRESS_RE.search(line)
@@ -805,8 +808,14 @@ def download_url(
         raise DownloadCancelled("Stahování bylo zrušeno uživatelem.")
 
     if returncode != 0:
-        message = "\n".join(recent_output).strip() or f"yt-dlp skončil s kódem {returncode}."
-        raise PornhubDownloadError(message)
+        # U profilu může yt-dlp po několika úspěšných videích narazit na
+        # jednu vadnou položku a skončit nenulovým kódem. Hotová videa jsou
+        # už bezpečně zapsaná. Neoznačíme proto celý profil jako "Chyba";
+        # případná nedokončená nová videa zůstanou v databázi jako nová.
+        is_profile_or_list = "view_video.php" not in str(url or "").casefold()
+        if not (is_profile_or_list and completed_any):
+            message = "\n".join(recent_output).strip() or f"yt-dlp skončil s kódem {returncode}."
+            raise PornhubDownloadError(message)
 
     if progress_callback is not None:
         progress_callback(
