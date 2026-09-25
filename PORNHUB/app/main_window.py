@@ -1056,16 +1056,26 @@ class MainWindow(QMainWindow):
         top.addWidget(self.search_edit)
         top.addStretch(1)
 
-        top_right = QVBoxLayout()
-        self.settings_button = QPushButton("Nastavení")
-        self.settings_button.clicked.connect(self.open_settings)
-        top_right.addWidget(self.settings_button)
-        self.requirements_button = QPushButton("Požadavky")
-        self.requirements_button.clicked.connect(self.open_requirements)
-        top_right.addWidget(self.requirements_button)
+        top_right = QHBoxLayout()
+        top_right.setSpacing(6)
+
         self.open_folder_button = QPushButton("Otevřít složku")
         self.open_folder_button.clicked.connect(self.open_download_folder)
         top_right.addWidget(self.open_folder_button)
+
+        # Nastavení a požadavky jsou méně časté akce. Schováme je pod
+        # kompaktní nabídku, aby zbytečně nezvyšovaly horní část okna.
+        self.settings_button = QPushButton("⋮")
+        self.settings_button.setFixedWidth(36)
+        self.settings_button.setToolTip("Další možnosti")
+        more_menu = QMenu(self.settings_button)
+        settings_action = more_menu.addAction("Nastavení")
+        settings_action.triggered.connect(self.open_settings)
+        requirements_action = more_menu.addAction("Požadavky")
+        requirements_action.triggered.connect(self.open_requirements)
+        self.settings_button.setMenu(more_menu)
+        top_right.addWidget(self.settings_button)
+
         top.addLayout(top_right)
         layout.addLayout(top)
 
