@@ -81,6 +81,26 @@ class Storage:
         self._write_json(self.categories_file, categories)
         return value
 
+    def set_profile_rating(self, urls: list[str], rating: str) -> None:
+        wanted = {str(url or "").strip() for url in urls if str(url or "").strip()}
+        if not wanted:
+            return
+
+        value = str(rating or "").strip().upper()
+        if value not in {"", "SUPER", "GOOD", "ASI NIC"}:
+            return
+
+        jobs = self.jobs()
+        changed = False
+        for job in jobs:
+            if str(job.get("url", "")).strip() in wanted:
+                if str(job.get("profile_rating") or "").strip().upper() != value:
+                    job["profile_rating"] = value
+                    changed = True
+
+        if changed:
+            self.save_jobs(jobs)
+
     def set_category(self, urls: list[str], category: str) -> None:
         wanted = {str(url or "").strip() for url in urls if str(url or "").strip()}
         if not wanted:
@@ -143,6 +163,7 @@ class Storage:
                 "recovery_videos": [],
                 "previous_urls": [],
                 "category": "",
+                "profile_rating": "",
                 "info_checked": False,
             }
             jobs.append(job)
@@ -175,6 +196,7 @@ class Storage:
                 "recovery_videos": [],
                 "previous_urls": [],
                 "category": "",
+                "profile_rating": "",
                 "info_checked": False,
             })
             known.add(value)
