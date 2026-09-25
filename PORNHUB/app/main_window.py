@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -27,9 +27,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QStatusBar,
-    QStyle,
     QStyledItemDelegate,
-    QStyleOptionViewItem,
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
@@ -70,17 +68,35 @@ class SortableTableWidgetItem(QTableWidgetItem):
 
 
 class HoverRowDelegate(QStyledItemDelegate):
-    """Propaguje hover stav na všechny buňky řádku, ne jen na jednu buňku."""
+    """Při přejetí myší zvýrazní celý řádek jen rámečkem, bez podbarvení."""
 
     def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+
         table = self.parent()
-        if (
+        if not (
             isinstance(table, HoverRowTableWidget)
             and table.hover_row == index.row()
         ):
-            option = QStyleOptionViewItem(option)
-            option.state |= QStyle.State_MouseOver
-        super().paint(painter, option, index)
+            return
+
+        rect = option.rect.adjusted(0, 0, -1, -1)
+        pen = QPen(QColor("#7f98ad"))
+        pen.setWidth(1)
+
+        painter.save()
+        painter.setPen(pen)
+
+        # Horní a dolní hrana přes všechny buňky vytvoří souvislý rámeček.
+        painter.drawLine(rect.topLeft(), rect.topRight())
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+        if index.column() == 0:
+            painter.drawLine(rect.topLeft(), rect.bottomLeft())
+        if index.column() == table.columnCount() - 1:
+            painter.drawLine(rect.topRight(), rect.bottomRight())
+
+        painter.restore()
 
 
 class HoverRowTableWidget(QTableWidget):
@@ -1086,9 +1102,6 @@ class MainWindow(QMainWindow):
                 background: #ffffff; alternate-background-color: #f8f9fa;
                 border: 1px solid #c9ccd1; gridline-color: #e1e3e6;
                 selection-background-color: #d7e7fb; selection-color: #111111;
-            }
-            QTableWidget::item:hover {
-                background: #edf2f7;
             }
             QTableWidget::item:selected {
                 background: #d7e7fb;
