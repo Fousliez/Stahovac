@@ -4,6 +4,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -139,6 +140,7 @@ class DownloadControl:
 
 
 BEST_FORMAT = "best[protocol=https][ext=mp4]/best"
+MIN_FREE_SPACE_BYTES = 2 * 1024 ** 3
 NETWORK_ARGS = [
     "--socket-timeout",
     "60",
