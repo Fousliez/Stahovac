@@ -46,6 +46,9 @@ Tento soubor je průběžný zdroj požadavků pro Pornhub část aplikace. Kaž
 - Při automatickém pozastavení kvůli místu se v aplikaci zobrazí stav `Pozastaveno` a varovná hláška s informací o nedostatku místa.
 - Tlačítko se přepne na `Pokračovat`; pokračování je dovoleno až ve chvíli, kdy je na cílovém disku opět alespoň 2 GB volného místa.
 - Automatické hlídání platí pro celou společnou frontu a všechny právě běžící download procesy.
+- Varovná hláška při nedostatku místa nabízí odsouhlasit pokračování pod limitem 2 GB.
+- Pokračování pod 2 GB vyžaduje výslovné potvrzení uživatele a vypne ochranu pouze pro aktuální běh stahování; při příštím spuštění stahování je ochrana znovu aktivní.
+- Pokud uživatel nejdřív nechá stahování pozastavené, může výjimku později potvrdit přes tlačítko `Pokračovat`.
 
 - Fronta se týká i více vybraných profilů, nejen více videí uvnitř jednoho profilu.
 - Existuje jedna společná fronta videí napříč všemi vybranými profily a celkový limit je nejvýše 5 současně stahovaných videí.
