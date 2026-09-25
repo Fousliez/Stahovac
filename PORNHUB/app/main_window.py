@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
 from .downloader import (
     DownloadCancelled,
     DownloadControl,
+    MIN_FREE_SPACE_BYTES,
     download_url,
     resolve_reference_cutoff,
     scan_source_with_identity,
@@ -165,6 +167,7 @@ class DownloadWorker(QObject):
     item_finished = Signal(str, bool, str, str)
     item_cancelled = Signal(str)
     video_downloaded = Signal(dict)
+    disk_space_low = Signal(int)
     failed = Signal(str)
     finished = Signal(int, int, bool)
 
@@ -187,11 +190,44 @@ class DownloadWorker(QObject):
         self.download_items_by_url = download_items_by_url or {}
         self.manual_parallel = manual_parallel
         self.control = DownloadControl()
+        self._disk_space_lock = threading.RLock()
+        self._disk_space_paused = False
+
+    def _free_space_bytes(self) -> int:
+        target = Path(self.destination).expanduser()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            return int(shutil.disk_usage(target).free)
+        except OSError:
+            return MIN_FREE_SPACE_BYTES
+
+    def _check_disk_space(self) -> bool:
+        free_bytes = self._free_space_bytes()
+        if free_bytes >= MIN_FREE_SPACE_BYTES:
+            return True
+
+        with self._disk_space_lock:
+            first_notice = not self._disk_space_paused
+            self._disk_space_paused = True
+
+        self.control.pause()
+        if first_notice:
+            self.disk_space_low.emit(free_bytes)
+        return False
 
     def pause(self) -> bool:
         return self.control.pause()
 
     def resume(self) -> bool:
+        free_bytes = self._free_space_bytes()
+        if free_bytes < MIN_FREE_SPACE_BYTES:
+            with self._disk_space_lock:
+                self._disk_space_paused = True
+            self.disk_space_low.emit(free_bytes)
+            return False
+
+        with self._disk_space_lock:
+            self._disk_space_paused = False
         return self.control.resume()
 
     def cancel(self) -> bool:
@@ -277,6 +313,7 @@ class DownloadWorker(QObject):
                 _video_index: int,
                 _video_total: int,
             ):
+                self._check_disk_space()
                 with state_lock:
                     progresses[position] = percent
                     speeds[position] = self._speed_bytes(speed)
@@ -452,6 +489,8 @@ class DownloadWorker(QObject):
                     total_sources,
                 )
 
+            self._check_disk_space()
+
             def progress(
                 percent: int,
                 _status: str,
@@ -460,6 +499,7 @@ class DownloadWorker(QObject):
                 _video_index: int,
                 _video_total: int,
             ):
+                self._check_disk_space()
                 with state_lock:
                     progresses[position] = percent
                     speeds[position] = self._speed_bytes(speed)
@@ -623,6 +663,7 @@ class DownloadWorker(QObject):
         def task(position: int, video_url: str) -> tuple[bool, str]:
             nonlocal completed, ok_count
             self.item_started.emit(video_url, position, total)
+            self._check_disk_space()
 
             def progress(
                 percent: int,
@@ -632,6 +673,7 @@ class DownloadWorker(QObject):
                 _video_index: int,
                 _video_total: int,
             ):
+                self._check_disk_space()
                 with state_lock:
                     progresses[position] = percent
                     speeds[position] = self._speed_bytes(speed)
@@ -786,6 +828,8 @@ class DownloadWorker(QObject):
                 break
             self.item_started.emit(url, index, total)
 
+            self._check_disk_space()
+
             def progress(
                 percent: int,
                 status: str,
@@ -794,6 +838,7 @@ class DownloadWorker(QObject):
                 video_index: int,
                 video_total: int,
             ):
+                self._check_disk_space()
                 label = "Stahuji"
                 if status == "finished":
                     label = "Dokončuji"
@@ -1240,6 +1285,7 @@ class MainWindow(QMainWindow):
         self._active_download_url = ""
         self._active_download_urls: set[str] = set()
         self._download_paused = False
+        self._download_paused_for_disk = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
         self._download_reference_url = ""
@@ -2832,6 +2878,7 @@ class MainWindow(QMainWindow):
         worker.item_finished.connect(self._item_finished)
         worker.item_cancelled.connect(self._item_cancelled)
         worker.video_downloaded.connect(self._video_downloaded)
+        worker.disk_space_low.connect(self._disk_space_low)
         worker.failed.connect(self._download_failed)
         worker.finished.connect(self._download_finished)
         worker.finished.connect(thread.quit)
@@ -2846,6 +2893,7 @@ class MainWindow(QMainWindow):
         self._active_download_url = ""
         self._active_download_urls.clear()
         self._download_paused = False
+        self._download_paused_for_disk = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
         self._download_reference_url = reference_url
@@ -2873,6 +2921,27 @@ class MainWindow(QMainWindow):
             return
 
         if self._download_paused:
+            if self._download_paused_for_disk:
+                default_dir = str(Path.home() / "Stažené" / "Pornhub")
+                destination = Path(
+                    self.storage.get_setting("download_dir", default_dir)
+                ).expanduser()
+                try:
+                    free_bytes = int(shutil.disk_usage(destination).free)
+                except OSError:
+                    free_bytes = MIN_FREE_SPACE_BYTES
+
+                if free_bytes < MIN_FREE_SPACE_BYTES:
+                    free_gb = free_bytes / (1024 ** 3)
+                    self.download_info_label.setText(
+                        f"Pozastaveno • málo místa na disku ({free_gb:.2f} GB volných)"
+                    )
+                    self.statusBar().showMessage(
+                        "Stahování zůstává pozastavené: na cílovém disku je méně než 2 GB volného místa.",
+                        7000,
+                    )
+                    return
+
             if not worker.resume():
                 self.statusBar().showMessage(
                     "Stahování se nepodařilo znovu spustit.",
@@ -2880,6 +2949,7 @@ class MainWindow(QMainWindow):
                 )
                 return
             self._download_paused = False
+            self._download_paused_for_disk = False
             self.pause_download_button.setText("Pozastavit")
             for active_url in list(self._active_download_urls):
                 self.storage.update_job(
@@ -3143,6 +3213,39 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(message, 8000)
         self.refresh_jobs()
 
+    @Slot(int)
+    def _disk_space_low(self, free_bytes: int):
+        first_notice = not self._download_paused_for_disk
+        self._download_paused = True
+        self._download_paused_for_disk = True
+        self._paused_info_text = self.download_info_label.text()
+        self.pause_download_button.setText("Pokračovat")
+        self.pause_download_button.setEnabled(True)
+
+        for active_url in list(self._active_download_urls):
+            self.storage.update_job(
+                active_url,
+                status="Pozastaveno",
+                progress=0,
+            )
+
+        free_gb = max(0, free_bytes) / (1024 ** 3)
+        message = (
+            f"Pozastaveno • málo místa na disku ({free_gb:.2f} GB volných). "
+            "Pro pokračování musí být na cílovém disku alespoň 2 GB volného místa."
+        )
+        self.download_info_label.setText(message)
+        self.statusBar().showMessage(message, 10000)
+        self.refresh_jobs()
+
+        if first_notice:
+            QMessageBox.warning(
+                self,
+                "Stahování pozastaveno",
+                "Na disku, kam se videa stahují, zbývá méně než 2 GB volného místa.\n\n"
+                "Stahování bylo automaticky pozastaveno. Uvolni místo a potom klikni na „Pokračovat“.",
+            )
+
     @Slot(str)
     def _download_failed(self, message: str):
         self.download_info_label.setText("Stahování se nepodařilo spustit.")
@@ -3253,6 +3356,7 @@ class MainWindow(QMainWindow):
         self._active_download_url = ""
         self._active_download_urls.clear()
         self._download_paused = False
+        self._download_paused_for_disk = False
         self._paused_info_text = ""
         self._download_cancel_requested = False
         self._download_reference_url = ""
