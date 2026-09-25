@@ -500,9 +500,13 @@ class Storage:
                 """
                 INSERT OR IGNORE INTO known_items(
                     source_url, id, extractor, title, webpage_url
-                ) VALUES (?, ?, ?, ?, ?)
+                )
+                SELECT ?, ?, ?, ?, ?
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM downloads WHERE id = ?
+                )
                 """,
-                rows,
+                [(*row, row[1]) for row in rows],
             )
             added = connection.total_changes - before
             connection.commit()
