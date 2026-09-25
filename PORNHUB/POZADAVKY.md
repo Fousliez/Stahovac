@@ -41,6 +41,12 @@ Tento soubor je průběžný zdroj požadavků pro Pornhub část aplikace. Kaž
 
 ## Paralelní stahování
 
+- Program průběžně hlídá volné místo na cílovém disku, kam se videa stahují.
+- Pokud volné místo klesne pod 2 GB, všechna právě běžící stahování se automaticky pozastaví.
+- Při automatickém pozastavení kvůli místu se v aplikaci zobrazí stav `Pozastaveno` a varovná hláška s informací o nedostatku místa.
+- Tlačítko se přepne na `Pokračovat`; pokračování je dovoleno až ve chvíli, kdy je na cílovém disku opět alespoň 2 GB volného místa.
+- Automatické hlídání platí pro celou společnou frontu a všechny právě běžící download procesy.
+
 - Fronta se týká i více vybraných profilů, nejen více videí uvnitř jednoho profilu.
 - Existuje jedna společná fronta videí napříč všemi vybranými profily a celkový limit je nejvýše 5 současně stahovaných videí.
 - Fronta se nesmí zbytečně zastavit na hranici profilu. Jakmile se uvolní slot, vezme se další video v pořadí fronty, i kdyby už patřilo následujícímu profilu.
