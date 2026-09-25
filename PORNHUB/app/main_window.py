@@ -2024,8 +2024,14 @@ class MainWindow(QMainWindow):
         self.refresh_jobs()
 
     def set_busy(self, busy: bool):
+        # Přidávání profilů/odkazů je bezpečná databázová operace a nemusí
+        # čekat na doběhnutí stahování. Během scanu/baseline ho ale necháme
+        # zamčené, aby se současně nepřestavoval seznam zdrojů.
+        self.add_button.setDisabled(
+            busy and self.download_thread is None
+        )
+
         for button in (
-            self.add_button,
             self.scan_button,
             self.download_new_button,
             self.download_newer_button,
