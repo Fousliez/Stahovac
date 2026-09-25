@@ -49,6 +49,9 @@ from .storage import Storage
 from .version import APPLICATION_NAME, BUILD_VERSION
 
 
+MAX_PARALLEL_DOWNLOADS = 5
+
+
 class SortableTableWidgetItem(QTableWidgetItem):
     def __init__(self, text: str, sort_value=None):
         super().__init__(text)
@@ -189,7 +192,7 @@ class DownloadWorker(QObject):
         source_total: int,
         items: list[dict],
     ) -> tuple[int, int, bool]:
-        """Stáhne nejvýše dvě DB-ově nové položky současně."""
+        """Stáhne nejvýše pět DB-ově nových položek současně."""
         if not items:
             self.item_progress.emit(
                 source_url, 100, "Souběžně", "", source_index, source_total, 1, 1
@@ -225,7 +228,7 @@ class DownloadWorker(QObject):
                         sum(progresses.get(i, 0) for i in range(1, video_total + 1))
                         / video_total
                     )
-                    active_until = min(video_total, completed + 2)
+                    active_until = min(video_total, completed + MAX_PARALLEL_DOWNLOADS)
                     total_speed = self._format_speed(sum(speeds.values()))
                 self.item_progress.emit(
                     source_url,
@@ -264,7 +267,7 @@ class DownloadWorker(QObject):
                     sum(progresses.get(i, 0) for i in range(1, video_total + 1))
                     / video_total
                 )
-                active_until = min(video_total, completed + 2)
+                active_until = min(video_total, completed + MAX_PARALLEL_DOWNLOADS)
                 total_speed = self._format_speed(sum(speeds.values()))
             self.item_progress.emit(
                 source_url,
@@ -280,7 +283,7 @@ class DownloadWorker(QObject):
 
         futures = []
         cancelled = False
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="ph-download") as pool:
+        with ThreadPoolExecutor(max_workers=MAX_PARALLEL_DOWNLOADS, thread_name_prefix="ph-download") as pool:
             for position, item in enumerate(items, start=1):
                 if self.control.cancelled:
                     cancelled = True
@@ -316,7 +319,7 @@ class DownloadWorker(QObject):
 
         # Referenční datum potřebujeme jen pro starý sekvenční fallback.
         # Pokud máme položky ze scan databáze, vybíráme novější videa přesně
-        # podle jejich pořadí a můžeme je pustit po dvou.
+        # podle jejich pořadí a můžeme je pustit po pěti.
         needs_reference_lookup = bool(
             self.reference_url
             and any(url not in self.download_items_by_url for url in self.urls)
@@ -1814,7 +1817,7 @@ class MainWindow(QMainWindow):
         urls: list[str],
         reference_url: str,
     ) -> dict[str, list[dict]]:
-        """Připraví DB-ově nové položky, které lze bezpečně tahat po dvou."""
+        """Připraví DB-ově nové položky, které lze bezpečně tahat po pěti."""
         result: dict[str, list[dict]] = {}
         reference_id = self._video_id_from_url(reference_url) if reference_url else ""
 
@@ -2099,7 +2102,7 @@ class MainWindow(QMainWindow):
         speed_text = speed.strip() or "—"
         if progress_mode == "Souběžně":
             self.download_info_label.setText(
-                f"Profil: {profile_name} • Rychlost celkem: {speed_text} • 2 souběžně"
+                f"Profil: {profile_name} • Rychlost celkem: {speed_text} • {MAX_PARALLEL_DOWNLOADS} souběžně"
             )
         else:
             self.download_info_label.setText(
