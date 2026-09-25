@@ -115,6 +115,18 @@ class HoverRowTableWidget(QTableWidget):
         self.viewport().setMouseTracking(True)
         self.setItemDelegate(HoverRowDelegate(self))
 
+    def mousePressEvent(self, event):
+        # Kliknutí do prázdné části samotné tabulky (např. pod posledním
+        # řádkem) musí zrušit výběr. Tohle místo nepatří centrálnímu widgetu,
+        # ale viewportu QTableWidget, takže globální "šedá plocha" ho nechytila.
+        if (
+            event.button() == Qt.LeftButton
+            and not self.indexAt(event.position().toPoint()).isValid()
+        ):
+            self.clearSelection()
+            self.setCurrentItem(None)
+        super().mousePressEvent(event)
+
     def mouseMoveEvent(self, event):
         row = self.indexAt(event.position().toPoint()).row()
         if row != self.hover_row:
