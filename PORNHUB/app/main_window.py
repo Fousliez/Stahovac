@@ -122,6 +122,7 @@ class DownloadWorker(QObject):
         cookies_file: str,
         reference_url: str,
         download_items_by_url: dict[str, list[dict]] | None = None,
+        manual_parallel: bool = False,
     ):
         super().__init__()
         self.urls = urls
@@ -130,6 +131,7 @@ class DownloadWorker(QObject):
         self.cookies_file = cookies_file
         self.reference_url = reference_url
         self.download_items_by_url = download_items_by_url or {}
+        self.manual_parallel = manual_parallel
         self.control = DownloadControl()
 
     def pause(self) -> bool:
@@ -311,11 +313,136 @@ class DownloadWorker(QObject):
 
         return downloaded, failed, cancelled
 
+    def _download_manual_urls(self) -> tuple[int, int, bool]:
+        """Stáhne ručně vložená videa paralelně, nejvýše po pěti."""
+        total = len(self.urls)
+        if not total:
+            return 0, 0, False
+
+        state_lock = threading.RLock()
+        progresses: dict[int, int] = {}
+        speeds: dict[int, float] = {}
+        completed = 0
+        ok_count = 0
+        error_count = 0
+
+        def task(position: int, video_url: str) -> tuple[bool, str]:
+            nonlocal completed, ok_count
+            self.item_started.emit(video_url, position, total)
+
+            def progress(
+                percent: int,
+                _status: str,
+                _title: str,
+                speed: str,
+                _video_index: int,
+                _video_total: int,
+            ):
+                with state_lock:
+                    progresses[position] = percent
+                    speeds[position] = self._speed_bytes(speed)
+                    overall = int(
+                        sum(progresses.get(i, 0) for i in range(1, total + 1))
+                        / total
+                    )
+                    visible_index = min(total, completed + MAX_PARALLEL_DOWNLOADS)
+                    total_speed = self._format_speed(sum(speeds.values()))
+                self.item_progress.emit(
+                    video_url,
+                    overall,
+                    "Ruční",
+                    total_speed,
+                    position,
+                    total,
+                    visible_index,
+                    total,
+                )
+
+            try:
+                download_url(
+                    video_url,
+                    self.destination,
+                    self.archive_file,
+                    cookies_file=self.cookies_file,
+                    progress_callback=progress,
+                    completed_callback=self.video_downloaded.emit,
+                    control=self.control,
+                    use_archive=False,
+                )
+            except DownloadCancelled:
+                raise
+            except Exception as exc:
+                return False, str(exc)
+
+            with state_lock:
+                progresses[position] = 100
+                speeds[position] = 0.0
+                completed += 1
+                ok_count += 1
+                overall = int(
+                    sum(progresses.get(i, 0) for i in range(1, total + 1))
+                    / total
+                )
+                visible_index = min(total, completed + MAX_PARALLEL_DOWNLOADS)
+                total_speed = self._format_speed(sum(speeds.values()))
+            self.item_progress.emit(
+                video_url,
+                overall,
+                "Ruční",
+                total_speed,
+                position,
+                total,
+                visible_index,
+                total,
+            )
+            self.item_finished.emit(video_url, True, "", "")
+            return True, ""
+
+        futures = []
+        cancelled = False
+        with ThreadPoolExecutor(
+            max_workers=MAX_PARALLEL_DOWNLOADS,
+            thread_name_prefix="ph-manual",
+        ) as pool:
+            for position, video_url in enumerate(self.urls, start=1):
+                if self.control.cancelled:
+                    cancelled = True
+                    break
+                futures.append(pool.submit(task, position, video_url))
+
+            for future in as_completed(futures):
+                if self.control.cancelled:
+                    cancelled = True
+                    for pending in futures:
+                        pending.cancel()
+                    break
+                try:
+                    success, message = future.result()
+                except DownloadCancelled:
+                    cancelled = True
+                    for pending in futures:
+                        pending.cancel()
+                    break
+                except Exception as exc:
+                    error_count += 1
+                    self.item_finished.emit("", False, str(exc), "")
+                else:
+                    if not success:
+                        error_count += 1
+                        self.item_finished.emit("", False, message, "")
+
+        return ok_count, error_count, cancelled
+
     @Slot()
     def run(self):
         ok_count = 0
         error_count = 0
         total = len(self.urls)
+
+        if self.manual_parallel:
+            ok_count, error_count, cancelled = self._download_manual_urls()
+            self.finished.emit(ok_count, error_count, cancelled)
+            return
 
         # Referenční datum potřebujeme jen pro starý sekvenční fallback.
         # Pokud máme položky ze scan databáze, vybíráme novější videa přesně
@@ -532,6 +659,46 @@ class AddUrlsDialog(QDialog):
         return [line.strip() for line in self.edit.toPlainText().splitlines() if line.strip()]
 
 
+class ManualVideosDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Stáhnout jednotlivá videa")
+        self.resize(680, 340)
+
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            "Vlož 1 až 5 odkazů na konkrétní Pornhub videa. "
+            "Každý odkaz dej na samostatný řádek. Videa se stáhnou rovnou "
+            "a nemusíš je přidávat jako profily do hlavního seznamu."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.edit = QTextEdit()
+        self.edit.setPlaceholderText(
+            "https://www.pornhub.com/view_video.php?viewkey=…\n"
+            "https://www.pornhub.com/view_video.php?viewkey=…"
+        )
+        layout.addWidget(self.edit, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Stáhnout")
+        buttons.button(QDialogButtonBox.Cancel).setText("Zrušit")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def urls(self) -> list[str]:
+        values: list[str] = []
+        seen: set[str] = set()
+        for line in self.edit.toPlainText().splitlines():
+            value = line.strip()
+            if value and value not in seen:
+                seen.add(value)
+                values.append(value)
+        return values
+
+
 class NewerThanDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -673,6 +840,8 @@ class MainWindow(QMainWindow):
         self._download_reference_url = ""
         self._downloaded_video_count = 0
         self._download_skipped_count = 0
+        self._manual_video_batch = False
+        self._manual_skipped_downloaded = 0
 
         self.setWindowTitle(f"{APPLICATION_NAME} {BUILD_VERSION}")
         self.resize(1120, 760)
@@ -738,12 +907,14 @@ class MainWindow(QMainWindow):
 
         buttons = QHBoxLayout()
         self.add_button = QPushButton("+ Odkazy")
+        self.manual_videos_button = QPushButton("+ Videa")
         self.scan_button = QPushButton("Projít vybrané")
         self.download_new_button = QPushButton("Stáhnout nové")
         self.download_newer_button = QPushButton("Stáhnout novější…")
         self.delete_button = QPushButton("Odstranit")
         for button in (
             self.add_button,
+            self.manual_videos_button,
             self.scan_button,
             self.download_new_button,
             self.download_newer_button,
@@ -754,6 +925,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
 
         self.add_button.clicked.connect(self.add_urls)
+        self.manual_videos_button.clicked.connect(self.download_manual_videos)
         self.scan_button.clicked.connect(self.scan_selected)
         self.download_new_button.clicked.connect(self.download_new)
         self.download_newer_button.clicked.connect(self.download_newer)
@@ -1565,6 +1737,83 @@ class MainWindow(QMainWindow):
         self.storage.delete_urls(urls)
         self.refresh_jobs()
 
+    def download_manual_videos(self):
+        if (
+            self.download_thread is not None
+            or self.scan_thread is not None
+            or self.baseline_thread is not None
+        ):
+            self.statusBar().showMessage(
+                "Počkej na dokončení právě běžící kontroly nebo stahování.",
+                4000,
+            )
+            return
+
+        dialog = ManualVideosDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        urls = dialog.urls()
+        if not urls:
+            QMessageBox.warning(
+                self,
+                "Jednotlivá videa",
+                "Vlož alespoň jeden odkaz na video.",
+            )
+            return
+        if len(urls) > MAX_PARALLEL_DOWNLOADS:
+            QMessageBox.warning(
+                self,
+                "Jednotlivá videa",
+                f"Najednou lze vložit nejvýše {MAX_PARALLEL_DOWNLOADS} videí.",
+            )
+            return
+
+        invalid: list[str] = []
+        fresh: list[str] = []
+        skipped = 0
+        for url in urls:
+            try:
+                parsed = urlparse(url)
+                host = (parsed.hostname or "").casefold()
+            except ValueError:
+                host = ""
+
+            video_id = self._video_id_from_url(url)
+            if (
+                not host
+                or not (host == "pornhub.com" or host.endswith(".pornhub.com"))
+                or "view_video.php" not in url.casefold()
+                or not video_id
+            ):
+                invalid.append(url)
+                continue
+
+            if self.storage.is_downloaded(video_id):
+                skipped += 1
+            else:
+                fresh.append(url)
+
+        if invalid:
+            QMessageBox.warning(
+                self,
+                "Jednotlivá videa",
+                "Některý odkaz není platné Pornhub video:\n\n"
+                + "\n".join(invalid[:5]),
+            )
+            return
+
+        if not fresh:
+            QMessageBox.information(
+                self,
+                "Jednotlivá videa",
+                "Všechna vložená videa už jsou evidována jako stažená.",
+            )
+            return
+
+        self._manual_skipped_downloaded = skipped
+        self.start_download(fresh, manual_parallel=True)
+
     def scan_selected(self):
         if (
             self.download_thread is not None
@@ -1862,7 +2111,12 @@ class MainWindow(QMainWindow):
 
         return result
 
-    def start_download(self, urls: list[str], reference_url: str = ""):
+    def start_download(
+        self,
+        urls: list[str],
+        reference_url: str = "",
+        manual_parallel: bool = False,
+    ):
         if (
             self.download_thread is not None
             or self.scan_thread is not None
@@ -1877,7 +2131,11 @@ class MainWindow(QMainWindow):
         destination = self.storage.get_setting("download_dir", default_dir)
         cookies_file = self.storage.get_setting("cookies_file", "")
 
-        parallel_items = self._parallel_items_snapshot(urls, reference_url)
+        parallel_items = (
+            {}
+            if manual_parallel
+            else self._parallel_items_snapshot(urls, reference_url)
+        )
 
         thread = QThread(self)
         worker = DownloadWorker(
@@ -1887,6 +2145,7 @@ class MainWindow(QMainWindow):
             cookies_file,
             reference_url,
             parallel_items,
+            manual_parallel,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1913,6 +2172,7 @@ class MainWindow(QMainWindow):
         self._download_reference_url = reference_url
         self._downloaded_video_count = 0
         self._download_skipped_count = 0
+        self._manual_video_batch = manual_parallel
         for url in urls:
             self.storage.update_job(url, last_error="")
         self.set_busy(True)
@@ -2048,12 +2308,13 @@ class MainWindow(QMainWindow):
             return
 
         status = "Pozastaveno" if self._download_paused else f"Stahuji {index}/{total}"
-        self.storage.update_job(
-            url,
-            status=status,
-            progress=0,
-        )
-        profile_name = self._download_profile_name(url)
+        if not self._manual_video_batch:
+            self.storage.update_job(
+                url,
+                status=status,
+                progress=0,
+            )
+        profile_name = "Ruční videa" if self._manual_video_batch else self._download_profile_name(url)
         if self._download_paused:
             self.download_info_label.setText(
                 f"Profil: {profile_name} • pozastaveno"
@@ -2098,9 +2359,17 @@ class MainWindow(QMainWindow):
                 self.table.item(row, 7).setText("Pozastaveno")
             return
 
-        profile_name = self._download_profile_name(url)
+        profile_name = (
+            "Ruční videa"
+            if progress_mode == "Ruční"
+            else self._download_profile_name(url)
+        )
         speed_text = speed.strip() or "—"
-        if progress_mode == "Souběžně":
+        if progress_mode == "Ruční":
+            self.download_info_label.setText(
+                f"Ruční videa • Rychlost celkem: {speed_text} • až {MAX_PARALLEL_DOWNLOADS} souběžně"
+            )
+        elif progress_mode == "Souběžně":
             self.download_info_label.setText(
                 f"Profil: {profile_name} • Rychlost celkem: {speed_text} • {MAX_PARALLEL_DOWNLOADS} souběžně"
             )
@@ -2109,7 +2378,7 @@ class MainWindow(QMainWindow):
                 f"Profil: {profile_name} • Rychlost: {speed_text}"
             )
 
-        if progress_mode == "Souběžně" and video_total > 1:
+        if progress_mode in {"Souběžně", "Ruční"} and video_total > 1:
             self.progress.setFormat(
                 f"Videa {video_index}/{video_total} • %p%"
             )
@@ -2154,6 +2423,11 @@ class MainWindow(QMainWindow):
 
     @Slot(str, bool, str, str)
     def _item_finished(self, url: str, success: bool, message: str, title: str):
+        if self._manual_video_batch:
+            if not success and message:
+                self.statusBar().showMessage(message, 8000)
+            return
+
         if success:
             if self.is_single_video_url(url):
                 changes = {"status": "Aktuální", "progress": 100}
@@ -2218,6 +2492,22 @@ class MainWindow(QMainWindow):
             return
 
         self.progress.setValue(100 if error_count == 0 else self.progress.value())
+
+        if self._manual_video_batch:
+            lines = [f"Staženo: {self._downloaded_video_count} videí."]
+            if self._manual_skipped_downloaded:
+                lines.append(
+                    f"Už bylo staženo: {self._manual_skipped_downloaded} videí."
+                )
+            if error_count:
+                lines.append(f"Nepodařilo se: {error_count} videí.")
+            QMessageBox.information(
+                self,
+                "Ruční stahování hotovo",
+                "\n".join(lines),
+            )
+            return
+
         total = ok_count + error_count
         self.download_info_label.setText(
             f"Hotovo: {ok_count}/{total} • Chyby: {error_count}"
@@ -2281,6 +2571,8 @@ class MainWindow(QMainWindow):
         self._download_reference_url = ""
         self._downloaded_video_count = 0
         self._download_skipped_count = 0
+        self._manual_video_batch = False
+        self._manual_skipped_downloaded = 0
         self.pause_download_button.setText("Pozastavit")
         self.pause_download_button.setEnabled(False)
         self.cancel_download_button.setEnabled(False)
@@ -2292,12 +2584,13 @@ class MainWindow(QMainWindow):
         self.refresh_jobs()
 
     def set_busy(self, busy: bool):
-        # Přidávání profilů/odkazů je bezpečná databázová operace a nemusí
-        # čekat na doběhnutí stahování. Během scanu/baseline ho ale necháme
-        # zamčené, aby se současně nepřestavoval seznam zdrojů.
-        self.add_button.setDisabled(
-            busy and self.download_thread is None
-        )
+        # Přidání profilu je jen zápis do jobs.json. Může bezpečně proběhnout
+        # i během stahování, kontroly nebo baseline scanu.
+        self.add_button.setEnabled(True)
+
+        # Ruční videa spouštějí vlastní download worker, takže během jiné
+        # síťové akce je nepouštíme souběžně s ní.
+        self.manual_videos_button.setDisabled(busy)
 
         for button in (
             self.scan_button,
