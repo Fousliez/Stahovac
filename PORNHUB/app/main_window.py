@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QThread, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -754,6 +754,34 @@ class NewerThanDialog(QDialog):
         return self.reference_edit.text().strip()
 
 
+class RequirementsDialog(QDialog):
+    def __init__(self, requirements_path: Path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Požadavky")
+        self.resize(900, 700)
+
+        layout = QVBoxLayout(self)
+        self.view = QTextEdit()
+        self.view.setReadOnly(True)
+
+        try:
+            content = requirements_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            content = (
+                "# Požadavky\n\n"
+                "Soubor požadavků se nepodařilo načíst.\n\n"
+                f"{exc}"
+            )
+
+        self.view.setMarkdown(content)
+        layout.addWidget(self.view, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.button(QDialogButtonBox.Close).setText("Zavřít")
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, storage: Storage, parent=None):
         super().__init__(parent)
@@ -872,6 +900,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APPLICATION_NAME} {BUILD_VERSION}")
         self.resize(1120, 760)
         self._build_ui()
+        self._install_background_deselect_filters()
         self._apply_style()
         self.refresh_category_filter()
         self.refresh_jobs()
@@ -882,6 +911,30 @@ class MainWindow(QMainWindow):
         self.table.clearSelection()
         self.table.setCurrentItem(None)
         self.update_profile_count()
+
+    def _install_background_deselect_filters(self):
+        """Zruší výběr i při kliknutí na pasivní prvky v šedé ploše."""
+        central = self.centralWidget()
+        if central is None:
+            return
+
+        targets = [central, self.statusBar(), *central.findChildren(QLabel)]
+        for widget in targets:
+            widget.setProperty("clearTableSelectionOnClick", True)
+            widget.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if (
+            event.type() == QEvent.MouseButtonPress
+            and bool(watched.property("clearTableSelectionOnClick"))
+            and event.button() == Qt.LeftButton
+        ):
+            self.clear_table_selection()
+        return super().eventFilter(watched, event)
+
+    def open_requirements(self):
+        requirements_path = Path(__file__).resolve().parents[1] / "POZADAVKY.md"
+        RequirementsDialog(requirements_path, self).exec()
 
     def _build_ui(self):
         central = DeselectBackgroundWidget(self)
@@ -912,6 +965,9 @@ class MainWindow(QMainWindow):
         self.settings_button = QPushButton("Nastavení")
         self.settings_button.clicked.connect(self.open_settings)
         top_right.addWidget(self.settings_button)
+        self.requirements_button = QPushButton("Požadavky")
+        self.requirements_button.clicked.connect(self.open_requirements)
+        top_right.addWidget(self.requirements_button)
         self.open_folder_button = QPushButton("Otevřít složku")
         self.open_folder_button.clicked.connect(self.open_download_folder)
         top_right.addWidget(self.open_folder_button)
