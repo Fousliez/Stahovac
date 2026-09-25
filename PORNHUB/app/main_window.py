@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from PySide6.QtCore import QEvent, QObject, QThread, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QEvent, QItemSelectionModel, QObject, QThread, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -118,15 +118,37 @@ class HoverRowTableWidget(QTableWidget):
         self.setItemDelegate(HoverRowDelegate(self))
 
     def mousePressEvent(self, event):
-        # Kliknutí do prázdné části samotné tabulky (např. pod posledním
-        # řádkem) musí zrušit výběr. Tohle místo nepatří centrálnímu widgetu,
-        # ale viewportu QTableWidget, takže globální "šedá plocha" ho nechytila.
+        index = self.indexAt(event.position().toPoint())
+
+        # První úzký sloupec je checkbox. Kliknutí na něj pouze přidá/odebere
+        # daný řádek z výběru a nikdy nesmí přerovnat tabulku.
         if (
             event.button() == Qt.LeftButton
-            and not self.indexAt(event.position().toPoint()).isValid()
+            and index.isValid()
+            and index.column() == 0
         ):
+            model = self.selectionModel()
+            if model is not None:
+                row_index = self.model().index(index.row(), 0)
+                selected = model.isRowSelected(
+                    index.row(),
+                    self.rootIndex(),
+                )
+                flags = (
+                    QItemSelectionModel.Deselect | QItemSelectionModel.Rows
+                    if selected
+                    else QItemSelectionModel.Select | QItemSelectionModel.Rows
+                )
+                model.select(row_index, flags)
+            event.accept()
+            return
+
+        # Kliknutí do prázdné části samotné tabulky (např. pod posledním
+        # řádkem) musí zrušit výběr.
+        if event.button() == Qt.LeftButton and not index.isValid():
             self.clearSelection()
             self.setCurrentItem(None)
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -1131,9 +1153,10 @@ class MainWindow(QMainWindow):
         self.count_label.setObjectName("sectionTitle")
         layout.addWidget(self.count_label)
 
-        self.table = HoverRowTableWidget(0, 8)
+        self.table = HoverRowTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(
             [
+                "",
                 "Název",
                 "Kategorie",
                 "Odkaz",
@@ -1160,7 +1183,9 @@ class MainWindow(QMainWindow):
         self.table.cellDoubleClicked.connect(self.open_row_url)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_job_context_menu)
+        self.table.itemSelectionChanged.connect(self.sync_row_checkboxes)
         self.table.itemSelectionChanged.connect(self.update_profile_count)
+        self.table.setColumnWidth(0, 34)
         layout.addWidget(self.table, 1)
 
         self.profile_count_label = QLabel("PROFILY: 0 • OZNAČENO: 0")
@@ -1289,6 +1314,10 @@ class MainWindow(QMainWindow):
                 background: #d7e7fb;
                 color: #111111;
             }
+            QTableWidget::indicator {
+                width: 18px;
+                height: 18px;
+            }
             QHeaderView::section {
                 background: #e8eaed; border: 0; border-right: 1px solid #cfd2d6;
                 border-bottom: 1px solid #c4c7cc; padding: 7px; font-weight: 700;
@@ -1388,7 +1417,7 @@ class MainWindow(QMainWindow):
         # data kontroly, stavu nebo počtů nesmí tabulku sama přerovnat.
         previous_order: list[str] = []
         for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
+            item = self.table.item(row, 1)
             url = str(item.data(Qt.UserRole) or "") if item else ""
             if url:
                 previous_order.append(url)
@@ -1476,10 +1505,24 @@ class MainWindow(QMainWindow):
                 status.casefold(),
             ]
 
-            for column, value in enumerate(values):
-                item = SortableTableWidgetItem(value, sort_values[column])
+            checkbox_item = QTableWidgetItem()
+            checkbox_item.setFlags(
+                Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+            )
+            checkbox_item.setCheckState(
+                Qt.Checked if url in current else Qt.Unchecked
+            )
+            checkbox_item.setTextAlignment(Qt.AlignCenter)
+            checkbox_item.setData(Qt.UserRole, url)
+            if status == "Aktuální":
+                checkbox_item.setBackground(QColor("#e6f4e6"))
+            self.table.setItem(row, 0, checkbox_item)
+
+            for data_column, value in enumerate(values):
+                column = data_column + 1
+                item = SortableTableWidgetItem(value, sort_values[data_column])
                 item.setData(Qt.UserRole, url)
-                if column in {4, 5, 6}:
+                if data_column in {4, 5, 6}:
                     item.setTextAlignment(Qt.AlignCenter)
                 if status == "Aktuální":
                     item.setBackground(QColor("#e6f4e6"))
@@ -1489,7 +1532,9 @@ class MainWindow(QMainWindow):
                 self.table.selectRow(row)
 
         self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(0, 34)
         self.table.blockSignals(False)
+        self.sync_row_checkboxes()
 
         self.count_label.setText(f"ODKAZY: {len(jobs)}")
         self.filter_jobs(self.search_edit.text())
@@ -1497,6 +1542,9 @@ class MainWindow(QMainWindow):
 
     def sort_table_by_column(self, column: int):
         """Jednorázově seřadí tabulku pouze po kliknutí na hlavičku."""
+        if column == 0:
+            return
+
         if column == self._last_manual_sort_column:
             order = (
                 Qt.DescendingOrder
@@ -1533,7 +1581,7 @@ class MainWindow(QMainWindow):
                 for col in range(self.table.columnCount())
             ).casefold()
 
-            row_url_item = self.table.item(row, 0)
+            row_url_item = self.table.item(row, 1)
             row_url = str(row_url_item.data(Qt.UserRole) or "") if row_url_item else ""
             category = str(
                 (jobs_by_url.get(row_url) or {}).get("category") or ""
@@ -1548,6 +1596,29 @@ class MainWindow(QMainWindow):
 
         self.update_profile_count()
 
+    def sync_row_checkboxes(self):
+        if not hasattr(self, "table"):
+            return
+
+        model = self.table.selectionModel()
+        selected_rows = {
+            index.row()
+            for index in model.selectedRows()
+        } if model is not None else set()
+
+        was_blocked = self.table.blockSignals(True)
+        try:
+            for row in range(self.table.rowCount()):
+                checkbox_item = self.table.item(row, 0)
+                if checkbox_item is None:
+                    continue
+                checkbox_item.setCheckState(
+                    Qt.Checked if row in selected_rows else Qt.Unchecked
+                )
+        finally:
+            self.table.blockSignals(was_blocked)
+        self.table.viewport().update()
+
     def update_profile_count(self):
         if not hasattr(self, "profile_count_label") or not hasattr(self, "table"):
             return
@@ -1560,7 +1631,7 @@ class MainWindow(QMainWindow):
         } if self.table.selectionModel() is not None else set()
 
         for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
+            item = self.table.item(row, 1)
             url = str(item.data(Qt.UserRole) or "") if item else ""
             if not url or self.is_single_video_url(url):
                 continue
@@ -1579,7 +1650,7 @@ class MainWindow(QMainWindow):
             return []
         urls: list[str] = []
         for index in model.selectedRows():
-            item = self.table.item(index.row(), 0)
+            item = self.table.item(index.row(), 1)
             value = str(item.data(Qt.UserRole) or "") if item else ""
             if value:
                 urls.append(value)
@@ -1792,8 +1863,8 @@ class MainWindow(QMainWindow):
         if row not in selected_rows:
             self.table.clearSelection()
             self.table.selectRow(row)
-        self.table.setCurrentCell(row, 0)
-        url = str(self.table.item(row, 0).data(Qt.UserRole) or "")
+        self.table.setCurrentCell(row, 1)
+        url = str(self.table.item(row, 1).data(Qt.UserRole) or "")
 
         menu = QMenu(self)
         open_action = menu.addAction("Otevřít odkaz")
@@ -2039,14 +2110,14 @@ class MainWindow(QMainWindow):
             first_row = -1
             wanted = set(added_urls)
             for row in range(self.table.rowCount()):
-                item = self.table.item(row, 0)
+                item = self.table.item(row, 1)
                 row_url = str(item.data(Qt.UserRole) or "") if item else ""
                 if row_url in wanted:
                     self.table.selectRow(row)
                     if first_row < 0:
                         first_row = row
             if first_row >= 0:
-                self.table.setCurrentCell(first_row, 0)
+                self.table.setCurrentCell(first_row, 1)
 
         message = f"Přidáno profilů: {added}"
         if references_updated:
@@ -2684,7 +2755,7 @@ class MainWindow(QMainWindow):
 
     def _row_for_url(self, url: str) -> int:
         for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
+            item = self.table.item(row, 1)
             if item is not None and str(item.data(Qt.UserRole) or "") == url:
                 return row
         return -1
@@ -2975,7 +3046,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Složka", str(exc))
 
     def open_row_url(self, row: int, _column: int):
-        item = self.table.item(row, 0)
+        if _column == 0:
+            return
+        item = self.table.item(row, 1)
         url = str(item.data(Qt.UserRole) or "") if item else ""
         if url:
             QDesktopServices.openUrl(QUrl(url))
