@@ -81,6 +81,11 @@ Tento soubor je průběžný zdroj požadavků pro Pornhub část aplikace. Kaž
 
 ## Tabulka a stav řádků
 
+- Každý profil může mít vlastní ruční hodnocení: `SUPER`, `GOOD`, `ASI NIC` nebo bez hodnocení.
+- Hodnocení se ukládá k profilu, přežije refresh i restart aplikace a zobrazuje se v samostatném sloupci `Hodnocení`.
+- Hodnocení se mění přes kontextovou nabídku řádku `Hodnocení profilu`; při více vybraných profilech se zvolená hodnota použije na celý výběr.
+- Změna hodnocení nesmí sama změnit pořadí řádků; řazení podle hodnocení nastane jen po explicitním kliknutí na hlavičku sloupce.
+
 - Každý řádek má vlevo vlastní viditelný informativní checkbox s fajfkou.
 - Checkbox není výběrový: neoznačuje ani neodznačuje řádek a nijak neurčuje, nad kterými profily se provedou akce.
 - Checkbox je pouze uživatelský marker a jeho stav se ukládá k profilu, aby přežil refresh i restart aplikace.
