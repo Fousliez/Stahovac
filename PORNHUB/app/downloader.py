@@ -533,7 +533,10 @@ def scan_url_items(
         "--add-header",
         "Referer:https://www.pornhub.com/",
         "--print",
-        f"{prefix}%(id)s\t%(extractor_key|pornhub)s\t%(title|)s\t%(webpage_url|)s",
+        (
+            f"{prefix}%(id)s\t%(extractor_key|pornhub)s\t%(title|)s\t"
+            "%(webpage_url|)s\t%(duration|)s"
+        ),
     ]
     if cookies_file.strip():
         base_cmd.extend(["--cookies", str(Path(cookies_file).expanduser())])
@@ -602,10 +605,18 @@ def scan_url_items(
         line = raw_line.strip()
         if not line.startswith(prefix):
             continue
-        parts = line[len(prefix):].split("\t", 3)
+        parts = line[len(prefix):].split("\t", 4)
         video_id = parts[0].strip() if parts else ""
         if not video_id:
             continue
+
+        duration = 0.0
+        if len(parts) > 4:
+            try:
+                duration = float(parts[4].strip() or 0)
+            except ValueError:
+                duration = 0.0
+
         items.setdefault(
             video_id,
             {
@@ -613,6 +624,7 @@ def scan_url_items(
                 "extractor": "pornhub",
                 "title": parts[2].strip() if len(parts) > 2 else "",
                 "webpage_url": parts[3].strip() if len(parts) > 3 else "",
+                "duration": duration,
             },
         )
 
