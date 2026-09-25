@@ -101,6 +101,58 @@ class Storage:
         if changed:
             self.save_jobs(jobs)
 
+    def add_source_entries(self, entries: list[dict]) -> tuple[int, int]:
+        """Přidá profily a uloží k nim volitelné poslední známé video."""
+        jobs = self.jobs()
+        by_url = {
+            str(job.get("url", "")).strip(): job
+            for job in jobs
+            if str(job.get("url", "")).strip()
+        }
+        added = 0
+        references_updated = 0
+
+        for entry in entries:
+            value = str(entry.get("url") or "").strip()
+            reference_url = str(entry.get("reference_url") or "").strip()
+            if not value:
+                continue
+
+            existing = by_url.get(value)
+            if existing is not None:
+                if (
+                    reference_url
+                    and str(existing.get("ph_reference_url") or "").strip()
+                    != reference_url
+                ):
+                    existing["ph_reference_url"] = reference_url
+                    references_updated += 1
+                continue
+
+            job = {
+                "url": value,
+                "title": "",
+                "status": "Připraveno",
+                "progress": 0,
+                "last_run": "",
+                "last_error": "",
+                "ph_user_id": "",
+                "ph_profile_name": "",
+                "ph_profile_path": "",
+                "ph_reference_url": reference_url,
+                "recovery_videos": [],
+                "previous_urls": [],
+                "category": "",
+            }
+            jobs.append(job)
+            by_url[value] = job
+            added += 1
+            if reference_url:
+                references_updated += 1
+
+        self.save_jobs(jobs)
+        return added, references_updated
+
     def add_urls(self, urls: list[str]) -> int:
         jobs = self.jobs()
         known = {str(job.get("url", "")).strip() for job in jobs}
