@@ -53,6 +53,11 @@ Tento soubor je průběžný zdroj požadavků pro Pornhub část aplikace. Kaž
 
 ## Kontrola a baseline
 
+- V nastavení je volba `Automaticky označit videa kratší než 60 sekund jako známá`; ve výchozím stavu je zapnutá.
+- Při kontrole profilu se video se známou délkou kratší než 60 sekund automaticky uloží jako známé/baseline a nebude nabízeno ke stažení.
+- Přesně 60sekundové video se nepřeskakuje; pravidlo platí jen pro délku `< 60 s`.
+- Pokud Pornhub/yt-dlp při plochém scanu délku videa neposkytne, video se automaticky nepřeskakuje jen na základě odhadu.
+
 - `Projít vybrané` pouze zjistí aktuální obsah a počty, nic nestahuje.
 - `Nastavit jako aktuální` označí současný obsah jako známý bez fyzického stahování.
 - Známé/baseline položky se v GUI započítávají do zobrazeného „Staženo“, ale interně nejsou totéž co fyzicky stažené soubory.
