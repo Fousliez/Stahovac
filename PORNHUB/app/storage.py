@@ -143,6 +143,7 @@ class Storage:
                 "recovery_videos": [],
                 "previous_urls": [],
                 "category": "",
+                "info_checked": False,
             }
             jobs.append(job)
             by_url[value] = job
@@ -174,6 +175,7 @@ class Storage:
                 "recovery_videos": [],
                 "previous_urls": [],
                 "category": "",
+                "info_checked": False,
             })
             known.add(value)
             added += 1
