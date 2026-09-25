@@ -1809,6 +1809,56 @@ class MainWindow(QMainWindow):
 
         self.start_download(urls, reference_url=reference_url)
 
+    def _parallel_items_snapshot(
+        self,
+        urls: list[str],
+        reference_url: str,
+    ) -> dict[str, list[dict]]:
+        """Připraví DB-ově nové položky, které lze bezpečně tahat po dvou."""
+        result: dict[str, list[dict]] = {}
+        reference_id = self._video_id_from_url(reference_url) if reference_url else ""
+
+        for url in urls:
+            if self.is_single_video_url(url):
+                continue
+
+            source_items = self.storage.source_items(url)
+            if not source_items:
+                # Bez posledního scanu nevíme bezpečně, která konkrétní ID
+                # patří do paralelní fronty. Necháme starý sekvenční fallback.
+                continue
+
+            new_ids = {
+                str(item.get("id") or "").strip()
+                for item in self.storage.new_items(url)
+                if str(item.get("id") or "").strip()
+            }
+
+            if reference_id:
+                reference_index = next(
+                    (
+                        index
+                        for index, item in enumerate(source_items)
+                        if str(item.get("id") or "").strip() == reference_id
+                    ),
+                    -1,
+                )
+                if reference_index < 0:
+                    # Referenční video není v posledním scanu. Starý režim
+                    # přes timestamp je v tomhle případě bezpečnější.
+                    continue
+                candidates = source_items[:reference_index]
+            else:
+                candidates = source_items
+
+            result[url] = [
+                item
+                for item in candidates
+                if str(item.get("id") or "").strip() in new_ids
+            ]
+
+        return result
+
     def start_download(self, urls: list[str], reference_url: str = ""):
         if (
             self.download_thread is not None
@@ -1824,6 +1874,8 @@ class MainWindow(QMainWindow):
         destination = self.storage.get_setting("download_dir", default_dir)
         cookies_file = self.storage.get_setting("cookies_file", "")
 
+        parallel_items = self._parallel_items_snapshot(urls, reference_url)
+
         thread = QThread(self)
         worker = DownloadWorker(
             urls,
@@ -1831,6 +1883,7 @@ class MainWindow(QMainWindow):
             str(self.storage.archive_file),
             cookies_file,
             reference_url,
+            parallel_items,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -2024,7 +2077,7 @@ class MainWindow(QMainWindow):
         self,
         url: str,
         percent: int,
-        _title: str,
+        progress_mode: str,
         speed: str,
         url_index: int,
         url_total: int,
@@ -2044,11 +2097,20 @@ class MainWindow(QMainWindow):
 
         profile_name = self._download_profile_name(url)
         speed_text = speed.strip() or "—"
-        self.download_info_label.setText(
-            f"Profil: {profile_name} • Rychlost: {speed_text}"
-        )
+        if progress_mode == "Souběžně":
+            self.download_info_label.setText(
+                f"Profil: {profile_name} • Rychlost celkem: {speed_text} • 2 souběžně"
+            )
+        else:
+            self.download_info_label.setText(
+                f"Profil: {profile_name} • Rychlost: {speed_text}"
+            )
 
-        if video_total > 1:
+        if progress_mode == "Souběžně" and video_total > 1:
+            self.progress.setFormat(
+                f"Videa {video_index}/{video_total} • %p%"
+            )
+        elif video_total > 1:
             self.progress.setFormat(
                 f"Video {video_index}/{video_total} • %p%"
             )
