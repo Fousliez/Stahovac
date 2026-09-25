@@ -99,6 +99,14 @@ class HoverRowDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class DeselectBackgroundWidget(QWidget):
+    background_clicked = Signal()
+
+    def mousePressEvent(self, event):
+        self.background_clicked.emit()
+        super().mousePressEvent(event)
+
+
 class HoverRowTableWidget(QTableWidget):
     def __init__(self, rows: int, columns: int, parent=None):
         super().__init__(rows, columns, parent)
@@ -868,8 +876,16 @@ class MainWindow(QMainWindow):
         self.refresh_category_filter()
         self.refresh_jobs()
 
+    def clear_table_selection(self):
+        if not hasattr(self, "table"):
+            return
+        self.table.clearSelection()
+        self.table.setCurrentItem(None)
+        self.update_profile_count()
+
     def _build_ui(self):
-        central = QWidget(self)
+        central = DeselectBackgroundWidget(self)
+        central.background_clicked.connect(self.clear_table_selection)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(18, 18, 18, 14)
         layout.setSpacing(10)
