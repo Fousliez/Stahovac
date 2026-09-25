@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -960,7 +960,12 @@ class MainWindow(QMainWindow):
         self.table.cellDoubleClicked.connect(self.open_row_url)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_job_context_menu)
+        self.table.itemSelectionChanged.connect(self.update_profile_count)
         layout.addWidget(self.table, 1)
+
+        self.profile_count_label = QLabel("PROFILY: 0 • OZNAČENO: 0")
+        self.profile_count_label.setObjectName("profileCount")
+        layout.addWidget(self.profile_count_label)
 
         download_controls = QHBoxLayout()
         self.pause_download_button = QPushButton("Pozastavit")
@@ -1009,6 +1014,10 @@ class MainWindow(QMainWindow):
             QLabel#title { font-size: 24px; font-weight: 800; color: #18191b; }
             QLabel#subtitle { font-size: 14px; color: #6b7078; margin-left: 8px; }
             QLabel#sectionTitle { font-size: 13px; font-weight: 800; color: #30343a; }
+            QLabel#profileCount {
+                font-size: 13px; font-weight: 800; color: #4a4f56;
+                padding: 2px 2px 4px 2px;
+            }
             QLabel#hint { color: #6b7078; padding: 6px 2px; }
             QLabel#downloadInfo { color: #30343a; font-weight: 700; padding: 3px 2px; }
             QPushButton, QLineEdit, QTextEdit {
@@ -1247,6 +1256,8 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.UserRole, url)
                 if column in {4, 5, 6}:
                     item.setTextAlignment(Qt.AlignCenter)
+                if status == "Aktuální":
+                    item.setBackground(QColor("#e6f4e6"))
                 self.table.setItem(row, column, item)
 
             if url in current:
@@ -1260,6 +1271,7 @@ class MainWindow(QMainWindow):
 
         self.count_label.setText(f"ODKAZY: {len(jobs)}")
         self.filter_jobs(self.search_edit.text())
+        self.update_profile_count()
 
     def filter_jobs(self, text: str):
         needle = text.strip().casefold()
@@ -1292,6 +1304,33 @@ class MainWindow(QMainWindow):
                 and category.casefold() != str(selected_category or "").casefold()
             )
             self.table.setRowHidden(row, search_mismatch or category_mismatch)
+
+        self.update_profile_count()
+
+    def update_profile_count(self):
+        if not hasattr(self, "profile_count_label") or not hasattr(self, "table"):
+            return
+
+        visible_profiles = 0
+        selected_profiles = 0
+        selected_rows = {
+            index.row()
+            for index in self.table.selectionModel().selectedRows()
+        } if self.table.selectionModel() is not None else set()
+
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            url = str(item.data(Qt.UserRole) or "") if item else ""
+            if not url or self.is_single_video_url(url):
+                continue
+            if not self.table.isRowHidden(row):
+                visible_profiles += 1
+                if row in selected_rows:
+                    selected_profiles += 1
+
+        self.profile_count_label.setText(
+            f"PROFILY: {visible_profiles} • OZNAČENO: {selected_profiles}"
+        )
 
     def selected_urls(self) -> list[str]:
         model = self.table.selectionModel()
